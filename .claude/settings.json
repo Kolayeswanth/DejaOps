@@ -1,7 +1,0 @@
-{
-    "env": {
-        "ANTHROPIC_BASE_URL": "http://localhost:20128/v1",
-        "ANTHROPIC_AUTH_TOKEN": "sk-ff76c600226389b2-32a2c6-52bd3b02",
-        "ANTHROPIC_MODEL": "123123"
-    }
-}
