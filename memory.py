@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from hindsight_client import Hindsight
 
 load_dotenv()
-BANK_ID = "northwind-oncall"
+BANK_ID = os.getenv("DEJAOPS_BANK", "dev-test")
 client = Hindsight(base_url=os.environ["HINDSIGHT_URL"],
                    api_key=os.environ["HINDSIGHT_API_KEY"], timeout=90.0)
 
@@ -66,6 +66,9 @@ def record_outcome(alert_text, fix, worked):
 def learned_summary():
     ans = client.reflect(
         bank_id=BANK_ID, budget="mid",
-        query=("In 5 short bullets, summarize what has been learned about which fixes work or "
-               "fail for each recurring incident pattern, and which runbooks are deprecated."))
+        query=("In up to 5 short bullets, summarize ONLY what is actually stored in this memory "
+               "bank: which fixes worked or failed for each recurring incident pattern, and which "
+               "runbooks are deprecated. Use only stored facts and the exact incident and runbook "
+               "IDs from memory. If the bank has little or no relevant information, reply exactly: "
+               "Not enough memory yet. Never invent IDs, dates or runbooks."))
     return ans.text

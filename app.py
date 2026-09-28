@@ -5,8 +5,14 @@ Streamlit UI — dark themed, two-column triage comparison.
 
 import json
 import os
+import html
+from concurrent.futures import ThreadPoolExecutor
 import streamlit as st
 from agent import triage, record_outcome, learned_summary
+from memory import BANK_ID
+
+def esc(x): return html.escape(str(x or ""))
+def blk(s): return "".join(line.strip() for line in s.splitlines())
 
 # ─────────────────────────────────────────────
 # Page config
@@ -215,7 +221,9 @@ st.markdown("""
     /* ── Hide Streamlit branding ── */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
+    .stAppDeployButton {display: none;}
+    [data-testid="stDecoration"] {display: none;}
+    header {background: transparent !important;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -261,20 +269,23 @@ demo_alerts = load_demo_alerts()
 with st.sidebar:
     st.markdown('<div class="sidebar-header">🧠 What DejaOps Has Learned</div>', unsafe_allow_html=True)
 
+    st.caption(f"Memory bank: {BANK_ID}")
+
+    if st.session_state.get("summary_stale"):
+        st.caption("Memory updated - click Refresh to update this summary")
+
     if st.button("🔄 Refresh", key="refresh_summary", use_container_width=True):
         with st.spinner("Reflecting on past incidents..."):
-            st.session_state.sidebar_summary = learned_summary()
-
-    # Auto-load on first visit
-    if st.session_state.sidebar_summary is None:
-        with st.spinner("Loading memory summary..."):
-            st.session_state.sidebar_summary = learned_summary()
+            try:
+                st.session_state.sidebar_summary = learned_summary()
+                st.session_state.summary_stale = False
+            except Exception as e:
+                st.error(str(e))
 
     if st.session_state.sidebar_summary:
-        st.markdown(
-            f'<div class="sidebar-content">{st.session_state.sidebar_summary}</div>',
-            unsafe_allow_html=True
-        )
+        st.markdown(st.session_state.sidebar_summary)
+    else:
+        st.markdown("Click Refresh to load")
 
     st.markdown("---")
     st.markdown(
@@ -327,23 +338,31 @@ with input_col2:
         "🚨 Triage",
         use_container_width=True,
         type="primary",
-        disabled=not alert_text.strip(),
     )
 
 
 # ─────────────────────────────────────────────
 # Run triage
 # ─────────────────────────────────────────────
-if triage_clicked and alert_text.strip():
-    st.session_state.current_alert = alert_text.strip()
-    st.session_state.outcome_saved = {}
+if triage_clicked:
+    if not alert_text.strip():
+        st.warning("Paste an alert or pick a demo alert first.")
+    else:
+        alert = alert_text.strip()
+        st.session_state.current_alert = alert
+        st.session_state.outcome_saved = {}
 
-    with st.spinner("⏳ Running triage — comparing with & without memory…"):
-        # Call both in sequence (parallelism not worth the complexity in Streamlit)
-        st.session_state.triage_result_no_mem = triage(alert_text.strip(), use_memory=False)
-        st.session_state.triage_result_mem = triage(alert_text.strip(), use_memory=True)
-
-    st.session_state.triage_done = True
+        with st.spinner("⏳ Running triage — comparing with & without memory…"):
+            try:
+                with ThreadPoolExecutor(max_workers=1) as ex:
+                    f_plain = ex.submit(triage, alert_text.strip(), False)  # Groq only, thread-safe
+                    mem = triage(alert_text.strip(), True)                   # uses Hindsight: MUST stay on the main thread
+                    plain = f_plain.result()
+                st.session_state.triage_result_no_mem = plain
+                st.session_state.triage_result_mem = mem
+                st.session_state.triage_done = True
+            except Exception as e:
+                st.error(str(e))
 
 
 # ─────────────────────────────────────────────
@@ -361,23 +380,23 @@ if st.session_state.triage_done:
         result = st.session_state.triage_result_no_mem
         if result:
             # Hypothesis
-            st.markdown(f"""
+            st.markdown(blk(f"""
             <div class="result-card">
                 <div class="card-label">Hypothesis</div>
-                <div class="card-text">{result['hypothesis']}</div>
+                <div class="card-text">{esc(result.get("hypothesis", ""))}</div>
             </div>
-            """, unsafe_allow_html=True)
+            """), unsafe_allow_html=True)
 
             # Recommended fixes
-            if result["recommended_fixes"]:
+            if result.get("recommended_fixes"):
                 st.markdown(f'<div class="card-label" style="margin-top:0.5rem;">Recommended Fixes</div>', unsafe_allow_html=True)
-                for i, fix in enumerate(result["recommended_fixes"]):
-                    st.markdown(f"""
+                for i, fix in enumerate(result.get("recommended_fixes", [])):
+                    st.markdown(blk(f"""
                     <div class="fix-card">
-                        <div class="fix-step">Step {i+1}: {fix['step']}</div>
-                        <div class="fix-reason">{fix['reason']}</div>
+                        <div class="fix-step">Step {i+1}: {esc(fix.get("step", ""))}</div>
+                        <div class="fix-reason">{esc(fix.get("reason", ""))}</div>
                     </div>
-                    """, unsafe_allow_html=True)
+                    """), unsafe_allow_html=True)
 
     # ── RIGHT COLUMN: With Memory ──
     with col_right:
@@ -386,23 +405,23 @@ if st.session_state.triage_done:
         result = st.session_state.triage_result_mem
         if result:
             # Hypothesis
-            st.markdown(f"""
+            st.markdown(blk(f"""
             <div class="result-card">
                 <div class="card-label">Hypothesis</div>
-                <div class="card-text">{result['hypothesis']}</div>
+                <div class="card-text">{esc(result.get("hypothesis", ""))}</div>
             </div>
-            """, unsafe_allow_html=True)
+            """), unsafe_allow_html=True)
 
             # Recommended fixes with Worked/Failed buttons
-            if result["recommended_fixes"]:
+            if result.get("recommended_fixes"):
                 st.markdown(f'<div class="card-label" style="margin-top:0.5rem;">Recommended Fixes</div>', unsafe_allow_html=True)
-                for i, fix in enumerate(result["recommended_fixes"]):
-                    st.markdown(f"""
+                for i, fix in enumerate(result.get("recommended_fixes", [])):
+                    st.markdown(blk(f"""
                     <div class="fix-card">
-                        <div class="fix-step">Step {i+1}: {fix['step']}</div>
-                        <div class="fix-reason">{fix['reason']}</div>
+                        <div class="fix-step">Step {i+1}: {esc(fix.get("step", ""))}</div>
+                        <div class="fix-reason">{esc(fix.get("reason", ""))}</div>
                     </div>
-                    """, unsafe_allow_html=True)
+                    """), unsafe_allow_html=True)
 
                     # Worked / Failed buttons
                     outcome_key = f"mem_fix_{i}"
@@ -410,14 +429,24 @@ if st.session_state.triage_done:
                         btn_cols = st.columns([1, 1, 3])
                         with btn_cols[0]:
                             if st.button("✅ Worked", key=f"worked_{i}"):
-                                record_outcome(st.session_state.current_alert, fix["step"], True)
-                                st.session_state.outcome_saved[outcome_key] = "worked"
-                                st.rerun()
+                                try:
+                                    record_outcome(st.session_state.current_alert, fix.get("step", ""), True)
+                                    st.session_state.outcome_saved[outcome_key] = "worked"
+                                    st.session_state.summary_stale = True
+                                    st.toast("Saved to memory")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(str(e))
                         with btn_cols[1]:
                             if st.button("❌ Failed", key=f"failed_{i}"):
-                                record_outcome(st.session_state.current_alert, fix["step"], False)
-                                st.session_state.outcome_saved[outcome_key] = "failed"
-                                st.rerun()
+                                try:
+                                    record_outcome(st.session_state.current_alert, fix.get("step", ""), False)
+                                    st.session_state.outcome_saved[outcome_key] = "failed"
+                                    st.session_state.summary_stale = True
+                                    st.toast("Saved to memory")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(str(e))
                     else:
                         saved_type = st.session_state.outcome_saved[outcome_key]
                         icon = "✅" if saved_type == "worked" else "❌"
@@ -427,21 +456,21 @@ if st.session_state.triage_done:
                         )
 
             # Evidence section
-            if result["evidence"]:
+            if result.get("evidence"):
                 st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="card-label">📚 Recalled from Memory</div>', unsafe_allow_html=True)
 
-                for ev in result["evidence"]:
-                    st.markdown(f"""
+                for ev in result.get("evidence", []):
+                    st.markdown(blk(f"""
                     <div class="evidence-card">
-                        <div class="evidence-id">{ev['incident_id']}</div>
-                        <div class="evidence-summary">{ev['summary']}</div>
-                        <div class="evidence-outcome">↳ <strong>Outcome:</strong> {ev['outcome']}</div>
+                        <div class="evidence-id">{esc(ev.get("incident_id", ""))}</div>
+                        <div class="evidence-summary">{esc(ev.get("summary", ""))}</div>
+                        <div class="evidence-outcome">↳ <strong>Outcome:</strong> {esc(ev.get("outcome", ""))}</div>
                     </div>
-                    """, unsafe_allow_html=True)
+                    """), unsafe_allow_html=True)
 
             # Warnings
-            if result["warnings"]:
+            if result.get("warnings"):
                 st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-                for warning in result["warnings"]:
-                    st.warning(warning)
+                for warning in result.get("warnings", []):
+                    st.warning(str(warning))
