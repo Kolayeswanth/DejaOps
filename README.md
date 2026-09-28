@@ -5,7 +5,7 @@
 DejaOps is an incident-response assistant with long-term memory, built on [Hindsight](https://github.com/vectorize-io/hindsight). Paste an alert and it shows two answers side by side: what a generic LLM would say, and what DejaOps says after recalling your team's past incidents, failed fixes and outdated runbooks. Mark a fix as **Worked** or **Failed** and the next recommendation changes.
 
 - Demo video: `[ADD YOUR YOUTUBE LINK]`
-- Team: `[ADD NAMES]`
+
 
 ## The problem
 
