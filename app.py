@@ -1,476 +1,188 @@
-"""
-DejaOps — The on-call agent that has seen this before.
-Streamlit UI — dark themed, two-column triage comparison.
-"""
-
-import json
-import os
-import html
+"""DejaOps - the on-call agent that has seen this before. Modern glass UI."""
+import html, json, os
 from concurrent.futures import ThreadPoolExecutor
 import streamlit as st
 from agent import triage, record_outcome, learned_summary
 from memory import BANK_ID
+try:
+    from agent import looks_like_alert
+except ImportError:
+    looks_like_alert = lambda t: len((t or "").split()) >= 3
+try:
+    from memory import retain_postmortem
+except ImportError:
+    retain_postmortem = None
 
-def esc(x): return html.escape(str(x or ""))
-def blk(s): return "".join(line.strip() for line in s.splitlines())
+st.set_page_config(page_title="DejaOps", page_icon="🔮", layout="wide", initial_sidebar_state="expanded")
 
-# ─────────────────────────────────────────────
-# Page config
-# ─────────────────────────────────────────────
-st.set_page_config(
-    page_title="DejaOps · On-Call AI Agent",
-    page_icon="🔮",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+esc = lambda x: html.escape(str(x or ""))
+def blk(s): return "".join(l.strip() for l in s.splitlines())
+def md(s): st.markdown(blk(s), unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────
-# Custom CSS — premium dark UI
-# ─────────────────────────────────────────────
-st.markdown("""
-<style>
-    /* ── Import Google Font ── */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+st.markdown("""<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&display=swap');
+:root{--bg:#070a13;--glass:rgba(255,255,255,.045);--line:rgba(255,255,255,.09);--txt:#e7ebf5;--mut:#8b94ab;--vio:#7c5cff;--cy:#22d3ee;--pink:#ff5c9d;--ok:#34d399;--warn:#fbbf24;--bad:#fb7185}
+html,body,[class*="css"]{font-family:Inter,sans-serif;color:var(--txt)}
+.stApp{background:radial-gradient(60rem 40rem at 8% -10%,rgba(124,92,255,.30),transparent 60%),radial-gradient(50rem 35rem at 95% 0%,rgba(34,211,238,.18),transparent 60%),radial-gradient(45rem 30rem at 50% 110%,rgba(255,92,157,.14),transparent 60%),var(--bg)}
+.stApp:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.16;background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:46px 46px;-webkit-mask-image:radial-gradient(ellipse at 50% 0%,#000 15%,transparent 70%);mask-image:radial-gradient(ellipse at 50% 0%,#000 15%,transparent 70%)}
+#MainMenu,footer,.stAppDeployButton,[data-testid="stDecoration"]{display:none}
+header{background:transparent!important}
+[data-testid="stSidebar"]{background:rgba(9,12,22,.78);backdrop-filter:blur(16px);border-right:1px solid var(--line)}
+.hero{text-align:center;padding:1.6rem 0 .6rem}
+.hero h1{font-family:'Space Grotesk',sans-serif;font-size:3.6rem;margin:0;letter-spacing:-.03em;background:linear-gradient(120deg,#a78bfa,#22d3ee 45%,#ff5c9d);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.hero p{color:var(--mut);margin:.2rem 0 .8rem;font-size:1.05rem}
+.live{display:inline-flex;align-items:center;gap:.5rem;padding:.3rem .8rem;border:1px solid var(--line);border-radius:99px;background:var(--glass);font-size:.75rem;color:var(--mut)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 rgba(52,211,153,.7);animation:pulse 2s infinite}
+.pipe{display:flex;justify-content:center;align-items:center;gap:.4rem;margin:.6rem 0 1.4rem;flex-wrap:wrap}
+.step{padding:.35rem .9rem;border-radius:99px;border:1px solid var(--line);background:var(--glass);font-size:.78rem;color:var(--mut);transition:.4s}
+.step.on{color:#fff;border-color:transparent;background:linear-gradient(120deg,var(--vio),var(--cy));box-shadow:0 6px 24px rgba(124,92,255,.45)}
+.arrow{color:var(--mut);opacity:.5}
+.glass{background:var(--glass);border:1px solid var(--line);border-radius:18px;padding:1.05rem 1.25rem;margin-bottom:.8rem;backdrop-filter:blur(14px);animation:rise .55s both}
+.glow{border:1px solid transparent;background:linear-gradient(#0d1120,#0d1120) padding-box,linear-gradient(120deg,var(--vio),var(--cy),var(--pink),var(--vio)) border-box;background-size:auto,300% 300%;animation:rise .55s both,shift 6s linear infinite;box-shadow:0 10px 40px rgba(124,92,255,.18)}
+.lab{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--cy);margin-bottom:.4rem;font-weight:600}
+.txt{font-size:.93rem;line-height:1.65;color:#d5dbea}
+.colh{display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem;font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:1.1rem}
+.badge{font-family:Inter;font-size:.68rem;font-weight:600;padding:.25rem .65rem;border-radius:99px;border:1px solid var(--line);color:var(--mut)}
+.badge.mem{color:#fff;border-color:transparent;background:linear-gradient(120deg,var(--vio),var(--pink))}
+.fix{display:flex;gap:.85rem;align-items:flex-start}
+.n{flex:none;width:28px;height:28px;border-radius:9px;display:grid;place-items:center;font-weight:700;font-size:.8rem;background:linear-gradient(135deg,var(--vio),var(--cy));color:#fff}
+.gen .n{background:rgba(255,255,255,.08);color:var(--mut)}
+.fs{font-weight:600;font-size:.92rem;color:#f1f4fb}.fr{color:var(--mut);font-size:.82rem;margin-top:.25rem}
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:.8rem;margin-bottom:1.1rem}
+.tile{padding:.9rem 1rem;text-align:left}.tile b{display:block;font-family:'Space Grotesk';font-size:1.9rem;line-height:1.1;background:linear-gradient(120deg,#fff,var(--cy));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}.tile span{font-size:.72rem;color:var(--mut)}
+.bar{height:6px;border-radius:9px;background:rgba(255,255,255,.08);overflow:hidden;margin-top:.5rem}.bar i{display:block;height:100%;border-radius:9px;animation:grow 1s both}
+.eid{display:inline-block;padding:.15rem .6rem;border-radius:99px;font-size:.72rem;font-weight:700;background:rgba(34,211,238,.12);color:var(--cy);margin-bottom:.4rem}
+.warn{border-left:3px solid var(--warn);background:rgba(251,191,36,.07);border-radius:12px;padding:.75rem 1rem;margin-bottom:.6rem;font-size:.88rem;color:#fde9b0;animation:rise .55s both}
+.saved{display:inline-block;margin:.1rem 0 .8rem 2.5rem;padding:.25rem .8rem;border-radius:99px;font-size:.75rem;font-weight:600;color:var(--ok);background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.3)}
+.stButton>button{border-radius:12px;font-weight:600;border:1px solid var(--line);background:var(--glass);color:var(--txt);transition:.25s}
+.stButton>button:hover{border-color:var(--vio);transform:translateY(-1px);box-shadow:0 6px 22px rgba(124,92,255,.3)}
+.stButton>button[kind="primary"]{border:0;color:#fff;background:linear-gradient(120deg,var(--vio),var(--cy));box-shadow:0 8px 30px rgba(124,92,255,.45)}
+[data-baseweb="textarea"],[data-baseweb="select"]>div{background:rgba(255,255,255,.04)!important;border:1px solid var(--line)!important;border-radius:14px!important}
+@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@keyframes pulse{70%{box-shadow:0 0 0 9px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+@keyframes shift{to{background-position:0 0,300% 0}}
+@keyframes grow{from{width:0}}
+</style>""", unsafe_allow_html=True)
 
-    /* ── Global ── */
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-    }
-    .stApp {
-        background: linear-gradient(165deg, #0a0e17 0%, #0E1117 40%, #121929 100%);
-    }
+for k, v in {"res_plain": None, "res_mem": None, "alert": "", "done": False, "not_alert": False,
+             "saved": {}, "summary": None, "stale": False}.items():
+    st.session_state.setdefault(k, v)
 
-    /* ── Hero Header ── */
-    .hero-container {
-        text-align: center;
-        padding: 2rem 1rem 1.5rem;
-        margin-bottom: 1rem;
-    }
-    .hero-title {
-        font-size: 3.2rem;
-        font-weight: 800;
-        background: linear-gradient(135deg, #6C63FF 0%, #B24BF3 50%, #FF6B9D 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        letter-spacing: -0.02em;
-        margin-bottom: 0.25rem;
-        animation: glow 3s ease-in-out infinite alternate;
-    }
-    @keyframes glow {
-        from { filter: drop-shadow(0 0 6px rgba(108,99,255,0.3)); }
-        to   { filter: drop-shadow(0 0 18px rgba(178,75,243,0.5)); }
-    }
-    .hero-tagline {
-        font-size: 1.15rem;
-        color: #8B949E;
-        font-weight: 400;
-        letter-spacing: 0.01em;
-    }
-
-    /* ── Divider ── */
-    .section-divider {
-        height: 1px;
-        background: linear-gradient(90deg, transparent, #30363d, transparent);
-        margin: 1.5rem 0;
-    }
-
-    /* ── Column headers ── */
-    .col-header {
-        font-size: 1.15rem;
-        font-weight: 700;
-        padding: 0.6rem 1rem;
-        border-radius: 10px;
-        text-align: center;
-        margin-bottom: 1rem;
-        letter-spacing: 0.02em;
-    }
-    .col-header-plain {
-        background: linear-gradient(135deg, #1c2333 0%, #21283b 100%);
-        border: 1px solid #30363d;
-        color: #8B949E;
-    }
-    .col-header-memory {
-        background: linear-gradient(135deg, #1a1640 0%, #251a4a 100%);
-        border: 1px solid #6C63FF44;
-        color: #B8B0FF;
-    }
-
-    /* ── Cards ── */
-    .result-card {
-        background: linear-gradient(145deg, #161B22 0%, #1c2333 100%);
-        border: 1px solid #30363d;
-        border-radius: 12px;
-        padding: 1.25rem;
-        margin-bottom: 1rem;
-        transition: border-color 0.3s ease, box-shadow 0.3s ease;
-    }
-    .result-card:hover {
-        border-color: #6C63FF66;
-        box-shadow: 0 4px 24px rgba(108, 99, 255, 0.08);
-    }
-    .card-label {
-        font-size: 0.7rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-        color: #6C63FF;
-        margin-bottom: 0.5rem;
-    }
-    .card-text {
-        color: #C9D1D9;
-        font-size: 0.92rem;
-        line-height: 1.65;
-    }
-
-    /* ── Fix step card ── */
-    .fix-card {
-        background: #161B22;
-        border: 1px solid #30363d;
-        border-left: 3px solid #6C63FF;
-        border-radius: 8px;
-        padding: 1rem 1.25rem;
-        margin-bottom: 0.75rem;
-    }
-    .fix-step {
-        color: #E6EDF3;
-        font-weight: 600;
-        font-size: 0.92rem;
-        margin-bottom: 0.35rem;
-    }
-    .fix-reason {
-        color: #8B949E;
-        font-size: 0.84rem;
-        font-style: italic;
-    }
-
-    /* ── Evidence cards ── */
-    .evidence-card {
-        background: linear-gradient(135deg, #1a1640 0%, #1c1d3a 100%);
-        border: 1px solid #6C63FF33;
-        border-radius: 10px;
-        padding: 1rem 1.25rem;
-        margin-bottom: 0.75rem;
-    }
-    .evidence-id {
-        display: inline-block;
-        background: #6C63FF22;
-        color: #B8B0FF;
-        font-size: 0.75rem;
-        font-weight: 700;
-        padding: 0.2rem 0.6rem;
-        border-radius: 20px;
-        margin-bottom: 0.5rem;
-        letter-spacing: 0.05em;
-    }
-    .evidence-summary {
-        color: #C9D1D9;
-        font-size: 0.88rem;
-        margin-bottom: 0.35rem;
-        line-height: 1.55;
-    }
-    .evidence-outcome {
-        color: #8B949E;
-        font-size: 0.82rem;
-    }
-
-    /* ── Saved badge ── */
-    .saved-badge {
-        display: inline-block;
-        background: linear-gradient(135deg, #0d3320 0%, #0f3d27 100%);
-        color: #3FB950;
-        font-size: 0.78rem;
-        font-weight: 600;
-        padding: 0.3rem 0.8rem;
-        border-radius: 20px;
-        border: 1px solid #3FB95044;
-        margin-top: 0.3rem;
-    }
-
-    /* ── Sidebar ── */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0d1117 0%, #161B22 100%);
-        border-right: 1px solid #21262d;
-    }
-    .sidebar-header {
-        font-size: 1.1rem;
-        font-weight: 700;
-        color: #E6EDF3;
-        margin-bottom: 0.75rem;
-        padding-bottom: 0.5rem;
-        border-bottom: 2px solid #6C63FF44;
-    }
-    .sidebar-content {
-        background: #161B22;
-        border: 1px solid #30363d;
-        border-radius: 10px;
-        padding: 1rem;
-        font-size: 0.88rem;
-        color: #C9D1D9;
-        line-height: 1.7;
-    }
-
-    /* ── Button overrides ── */
-    .stButton > button {
-        border-radius: 8px;
-        font-weight: 600;
-        font-size: 0.85rem;
-        transition: all 0.2s ease;
-    }
-
-    /* ── Hide Streamlit branding ── */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    .stAppDeployButton {display: none;}
-    [data-testid="stDecoration"] {display: none;}
-    header {background: transparent !important;}
-</style>
-""", unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────
-# Session state defaults
-# ─────────────────────────────────────────────
-defaults = {
-    "triage_result_no_mem": None,
-    "triage_result_mem": None,
-    "current_alert": "",
-    "triage_done": False,
-    "outcome_saved": {},       # key: (col, fix_index) → bool
-    "sidebar_summary": None,
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-
-# ─────────────────────────────────────────────
-# Load demo alerts
-# ─────────────────────────────────────────────
 @st.cache_data
-def load_demo_alerts():
-    path = os.path.join(os.path.dirname(__file__), "data", "demo_alerts.json")
+def load_demo():
     try:
-        with open(path) as f:
+        with open(os.path.join(os.path.dirname(__file__), "data", "demo_alerts.json"), encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
-        return [
-            {"id": "ALERT-001", "alert": "CRITICAL: payments-api p99 latency > 12s. Error rate 38%. PgBouncer at 100%."},
-            {"id": "ALERT-002", "alert": "WARNING: auth-service HTTP 503 for 40% of requests. Redis cluster unreachable."},
-            {"id": "ALERT-003", "alert": "CRITICAL: Kafka consumer lag > 500k. Consumer group has 0 active members."},
-        ]
+        return [{"id": "DEMO-X", "alert": "payments-api p99 latency > 12s, error rate 38%, pgbouncer at 100% of pool"}]
+demo = load_demo()
 
-demo_alerts = load_demo_alerts()
-
-
-# ─────────────────────────────────────────────
-# Sidebar — Learned Summary
-# ─────────────────────────────────────────────
 with st.sidebar:
-    st.markdown('<div class="sidebar-header">🧠 What DejaOps Has Learned</div>', unsafe_allow_html=True)
-
-    st.caption(f"Memory bank: {BANK_ID}")
-
-    if st.session_state.get("summary_stale"):
-        st.caption("Memory updated - click Refresh to update this summary")
-
-    if st.button("🔄 Refresh", key="refresh_summary", use_container_width=True):
+    md('<div class="lab" style="font-size:.8rem">🧠 What DejaOps has learned</div>')
+    md(f'<span class="live"><i class="dot"></i>Memory bank: {esc(BANK_ID)}</span>')
+    if st.button("🔄 Refresh", use_container_width=True, key="refresh"):
         with st.spinner("Reflecting on past incidents..."):
             try:
-                st.session_state.sidebar_summary = learned_summary()
-                st.session_state.summary_stale = False
+                st.session_state.summary, st.session_state.stale = learned_summary(), False
             except Exception as e:
                 st.error(str(e))
+    if st.session_state.stale:
+        st.caption("Memory updated - click Refresh to update this summary")
+    st.markdown(st.session_state.summary or "Click Refresh to load")
+    if retain_postmortem:
+        with st.expander("Teach DejaOps a postmortem"):
+            pm = st.text_area("Postmortem", key="pm_text", height=140)
+            if st.button("Teach DejaOps", key="pm_btn"):
+                if not pm.strip():
+                    st.warning("Paste a postmortem first.")
+                else:
+                    try:
+                        retain_postmortem(pm.strip())
+                        st.success("Learned. Run the alert again.")
+                        st.session_state.stale = True
+                    except Exception as e:
+                        st.error(str(e))
 
-    if st.session_state.sidebar_summary:
-        st.markdown(st.session_state.sidebar_summary)
+done = st.session_state.done
+md(f'''<div class="hero"><h1>DejaOps</h1><p>The on-call agent that has seen this before.</p>
+<span class="live"><i class="dot"></i>Powered by Hindsight memory</span></div>
+<div class="pipe"><span class="step on">① Alert</span><span class="arrow">→</span>
+<span class="step {'on' if done else ''}">② Recall</span><span class="arrow">→</span>
+<span class="step {'on' if done else ''}">③ Recommend</span><span class="arrow">→</span>
+<span class="step {'on' if any(st.session_state.saved.values()) else ''}">④ Learn</span></div>''')
+
+c1, c2 = st.columns([4, 1])
+with c1:
+    opts = ["— Pick a demo alert —"] + [f"{a['id']}: {a['alert'][:90]}…" for a in demo]
+    sel = st.selectbox("Demo", opts, label_visibility="collapsed")
+    default = demo[opts.index(sel) - 1]["alert"] if sel != opts[0] else st.session_state.alert
+    alert_text = st.text_area("Alert", value=default, height=110, label_visibility="collapsed",
+                              placeholder="Paste a PagerDuty / Datadog / CloudWatch alert, or pick a demo above…")
+with c2:
+    go = st.button("🚨 Triage", type="primary", use_container_width=True)
+
+if go:
+    a = alert_text.strip()
+    if not looks_like_alert(a):
+        st.session_state.not_alert, st.session_state.done = True, False
     else:
-        st.markdown("Click Refresh to load")
-
-    st.markdown("---")
-    st.markdown(
-        '<p style="color:#484f58;font-size:0.75rem;text-align:center;">'
-        'DejaOps v0.1 · Memory-augmented on-call triage</p>',
-        unsafe_allow_html=True
-    )
-
-
-# ─────────────────────────────────────────────
-# Hero header
-# ─────────────────────────────────────────────
-st.markdown("""
-<div class="hero-container">
-    <div class="hero-title">DejaOps</div>
-    <div class="hero-tagline">The on-call agent that has seen this before.</div>
-</div>
-""", unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────
-# Alert input section
-# ─────────────────────────────────────────────
-st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-
-input_col1, input_col2 = st.columns([3, 1])
-
-with input_col1:
-    # Demo alert dropdown
-    alert_options = ["— Select a demo alert —"] + [f"{a['id']}: {a['alert'][:80]}…" for a in demo_alerts]
-    selected = st.selectbox("Load a demo alert", alert_options, key="demo_select", label_visibility="collapsed")
-
-    # If a demo alert is selected, populate the text area
-    if selected != "— Select a demo alert —":
-        idx = alert_options.index(selected) - 1
-        default_text = demo_alerts[idx]["alert"]
-    else:
-        default_text = st.session_state.get("current_alert", "")
-
-    alert_text = st.text_area(
-        "📋 Paste an alert",
-        value=default_text,
-        height=120,
-        placeholder="Paste a PagerDuty / Datadog / CloudWatch alert here, or pick a demo above…",
-    )
-
-with input_col2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    triage_clicked = st.button(
-        "🚨 Triage",
-        use_container_width=True,
-        type="primary",
-    )
-
-
-# ─────────────────────────────────────────────
-# Run triage
-# ─────────────────────────────────────────────
-if triage_clicked:
-    if not alert_text.strip():
-        st.warning("Paste an alert or pick a demo alert first.")
-    else:
-        alert = alert_text.strip()
-        st.session_state.current_alert = alert
-        st.session_state.outcome_saved = {}
-
-        with st.spinner("⏳ Running triage — comparing with & without memory…"):
-            try:
+        st.session_state.not_alert, st.session_state.alert, st.session_state.saved = False, a, {}
+        try:
+            with st.spinner("Recalling past incidents and comparing…"):
                 with ThreadPoolExecutor(max_workers=1) as ex:
-                    f_plain = ex.submit(triage, alert_text.strip(), False)  # Groq only, thread-safe
-                    mem = triage(alert_text.strip(), True)                   # uses Hindsight: MUST stay on the main thread
-                    plain = f_plain.result()
-                st.session_state.triage_result_no_mem = plain
-                st.session_state.triage_result_mem = mem
-                st.session_state.triage_done = True
-            except Exception as e:
-                st.error(str(e))
+                    fp = ex.submit(triage, a, False)      # Groq only: thread-safe
+                    st.session_state.res_mem = triage(a, True)  # Hindsight: main thread only
+                    st.session_state.res_plain = fp.result()
+            st.session_state.done = True
+        except Exception as e:
+            st.error(str(e))
+    st.rerun() if st.session_state.not_alert else None
 
+if st.session_state.not_alert:
+    md('''<div class="glass"><div class="lab">Needs more detail</div><div class="txt">That doesn't look like an incident
+    alert. Paste the alert text (service, symptom, error message) or pick a demo alert.</div></div>''')
 
-# ─────────────────────────────────────────────
-# Display results
-# ─────────────────────────────────────────────
-if st.session_state.triage_done:
-    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+def fix_html(i, f, gen):
+    return f'''<div class="glass fix {'gen' if gen else ''}" style="animation-delay:{i*90}ms"><div class="n">{i+1}</div>
+    <div><div class="fs">{esc(f.get("step"))}</div><div class="fr">{esc(f.get("reason"))}</div></div></div>'''
 
-    col_left, col_right = st.columns(2, gap="large")
-
-    # ── LEFT COLUMN: Without Memory ──
-    with col_left:
-        st.markdown('<div class="col-header col-header-plain">🤖 Without Memory</div>', unsafe_allow_html=True)
-
-        result = st.session_state.triage_result_no_mem
-        if result:
-            # Hypothesis
-            st.markdown(blk(f"""
-            <div class="result-card">
-                <div class="card-label">Hypothesis</div>
-                <div class="card-text">{esc(result.get("hypothesis", ""))}</div>
-            </div>
-            """), unsafe_allow_html=True)
-
-            # Recommended fixes
-            if result.get("recommended_fixes"):
-                st.markdown(f'<div class="card-label" style="margin-top:0.5rem;">Recommended Fixes</div>', unsafe_allow_html=True)
-                for i, fix in enumerate(result.get("recommended_fixes", [])):
-                    st.markdown(blk(f"""
-                    <div class="fix-card">
-                        <div class="fix-step">Step {i+1}: {esc(fix.get("step", ""))}</div>
-                        <div class="fix-reason">{esc(fix.get("reason", ""))}</div>
-                    </div>
-                    """), unsafe_allow_html=True)
-
-    # ── RIGHT COLUMN: With Memory ──
-    with col_right:
-        st.markdown('<div class="col-header col-header-memory">🧠 With Memory (Hindsight)</div>', unsafe_allow_html=True)
-
-        result = st.session_state.triage_result_mem
-        if result:
-            # Hypothesis
-            st.markdown(blk(f"""
-            <div class="result-card">
-                <div class="card-label">Hypothesis</div>
-                <div class="card-text">{esc(result.get("hypothesis", ""))}</div>
-            </div>
-            """), unsafe_allow_html=True)
-
-            # Recommended fixes with Worked/Failed buttons
-            if result.get("recommended_fixes"):
-                st.markdown(f'<div class="card-label" style="margin-top:0.5rem;">Recommended Fixes</div>', unsafe_allow_html=True)
-                for i, fix in enumerate(result.get("recommended_fixes", [])):
-                    st.markdown(blk(f"""
-                    <div class="fix-card">
-                        <div class="fix-step">Step {i+1}: {esc(fix.get("step", ""))}</div>
-                        <div class="fix-reason">{esc(fix.get("reason", ""))}</div>
-                    </div>
-                    """), unsafe_allow_html=True)
-
-                    # Worked / Failed buttons
-                    outcome_key = f"mem_fix_{i}"
-                    if outcome_key not in st.session_state.outcome_saved or not st.session_state.outcome_saved[outcome_key]:
-                        btn_cols = st.columns([1, 1, 3])
-                        with btn_cols[0]:
-                            if st.button("✅ Worked", key=f"worked_{i}"):
-                                try:
-                                    record_outcome(st.session_state.current_alert, fix.get("step", ""), True)
-                                    st.session_state.outcome_saved[outcome_key] = "worked"
-                                    st.session_state.summary_stale = True
-                                    st.toast("Saved to memory")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(str(e))
-                        with btn_cols[1]:
-                            if st.button("❌ Failed", key=f"failed_{i}"):
-                                try:
-                                    record_outcome(st.session_state.current_alert, fix.get("step", ""), False)
-                                    st.session_state.outcome_saved[outcome_key] = "failed"
-                                    st.session_state.summary_stale = True
-                                    st.toast("Saved to memory")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(str(e))
-                    else:
-                        saved_type = st.session_state.outcome_saved[outcome_key]
-                        icon = "✅" if saved_type == "worked" else "❌"
-                        st.markdown(
-                            f'<div class="saved-badge">{icon} Saved to memory</div>',
-                            unsafe_allow_html=True
-                        )
-
-            # Evidence section
-            if result.get("evidence"):
-                st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="card-label">📚 Recalled from Memory</div>', unsafe_allow_html=True)
-
-                for ev in result.get("evidence", []):
-                    st.markdown(blk(f"""
-                    <div class="evidence-card">
-                        <div class="evidence-id">{esc(ev.get("incident_id", ""))}</div>
-                        <div class="evidence-summary">{esc(ev.get("summary", ""))}</div>
-                        <div class="evidence-outcome">↳ <strong>Outcome:</strong> {esc(ev.get("outcome", ""))}</div>
-                    </div>
-                    """), unsafe_allow_html=True)
-
-            # Warnings
-            if result.get("warnings"):
-                st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-                for warning in result.get("warnings", []):
-                    st.warning(str(warning))
+if st.session_state.done:
+    rp, rm = st.session_state.res_plain or {}, st.session_state.res_mem or {}
+    ev, wn, fx = rm.get("evidence", []), rm.get("warnings", []), rm.get("recommended_fixes", [])
+    low = not ev or any("no similar" in w.lower() for w in wn)
+    lvl, pct, col = ("Low", 18, "var(--bad)") if low else (("High", 92, "var(--ok)") if len(ev) >= 3 else ("Medium", 58, "var(--warn)"))
+    md(f'''<div class="tiles"><div class="glass tile"><b>{len(ev)}</b><span>past incidents recalled</span></div>
+    <div class="glass tile"><b>{len([w for w in wn if 'no similar' not in w.lower()])}</b><span>warnings from history</span></div>
+    <div class="glass tile"><b>{len(fx)}</b><span>vetted fixes</span></div>
+    <div class="glass tile"><b>{lvl}</b><span>confidence</span><div class="bar"><i style="width:{pct}%;background:{col}"></i></div></div></div>''')
+    L, R = st.columns(2, gap="large")
+    with L:
+        md('<div class="colh">🤖 Without memory<span class="badge">generic · no company context</span></div>')
+        md(f'<div class="glass"><div class="lab">Hypothesis</div><div class="txt">{esc(rp.get("hypothesis"))}</div></div>')
+        for i, f in enumerate(rp.get("recommended_fixes", [])):
+            md(fix_html(i, f, True))
+    with R:
+        md(f'<div class="colh">🧠 With memory<span class="badge mem">Hindsight · {len(ev)} recalled</span></div>')
+        md(f'<div class="glass glow"><div class="lab">Hypothesis</div><div class="txt">{esc(rm.get("hypothesis"))}</div></div>')
+        for i, f in enumerate(fx):
+            md(fix_html(i, f, False))
+            key = f"fix_{i}"
+            if not st.session_state.saved.get(key):
+                b1, b2, _ = st.columns([1, 1, 3])
+                for col_, label, ok in ((b1, "✅ Worked", True), (b2, "❌ Failed", False)):
+                    if col_.button(label, key=f"{'w' if ok else 'f'}{i}"):
+                        try:
+                            record_outcome(st.session_state.alert, f.get("step", ""), ok)
+                            st.session_state.saved[key] = "worked" if ok else "failed"
+                            st.session_state.stale = True
+                            st.toast("Saved to memory")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+            else:
+                md(f'<span class="saved">{"✅" if st.session_state.saved[key] == "worked" else "❌"} Saved to memory</span>')
+        for e in ev:
+            md(f'''<div class="glass"><span class="eid">{esc(e.get("incident_id"))}</span>
+            <div class="txt">{esc(e.get("summary"))}</div><div class="fr">↳ {esc(e.get("outcome"))}</div></div>''')
+        for w in wn:
+            md(f'<div class="warn">⚠ {esc(w)}</div>')

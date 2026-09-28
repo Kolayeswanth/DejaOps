@@ -24,6 +24,8 @@ SYSTEM_MEMORY = ("You are DejaOps, an on-call assistant with memory of this comp
                  "- If MEMORY shows a runbook is deprecated, warn and recommend its replacement, "
                  "but ONLY if that runbook applies to this alert's service or symptoms. "
                  "Otherwise do not mention it.\n"
+                 "- Some memories are engineer feedback with no incident ID. For those use "
+                 "incident_id 'FEEDBACK'. Never write UNKNOWN.\n"
                  "- Put fixes that WORKED first and say how many times they worked.\n"
                  "- If MEMORY has no relevant past incident, say so in the hypothesis, keep "
                  "evidence empty, and add the warning 'No similar past incidents found; low confidence.'\n"
@@ -40,7 +42,7 @@ def _ask(system, user):
             try:
                 r = groq.chat.completions.create(
                     model=model, temperature=0.2,
-                    messages=[{"role": "system", "content": system},
+                    messages=[{"role": "system", "content": system + " " + NOT_ALERT},
                               {"role": "user", "content": user}])
                 return _extract_json(r.choices[0].message.content)
             except Exception as e:
@@ -70,7 +72,19 @@ def _normalize(out):
     return {"hypothesis": s(out.get("hypothesis")), "recommended_fixes": fixes,
             "evidence": evidence, "warnings": warnings}
 
+def looks_like_alert(t):
+    t = (t or "").strip()
+    return len(t) >= 15 and len(t.split()) >= 3
+
+NOT_ALERT = ("If the input is not an incident alert (a greeting, a question, random text), return "
+             "hypothesis \"This doesn't look like an alert.\", empty recommended_fixes and evidence, "
+             "and the single warning \"Not an incident alert.\"")   
+
 def triage(alert_text, use_memory=True):
+    if not looks_like_alert(alert_text):
+        return {"hypothesis": "This doesn't look like an alert. Paste the alert text or pick a demo alert.",
+                "recommended_fixes": [], "evidence": [],
+                "warnings": ["Include the service, the symptom and any error message."]}
     if use_memory:
         mems = recall_similar(alert_text)
         block = "\n\n".join(f"[{m['type']}] {m['text']}" for m in mems) or "(nothing recalled)"
