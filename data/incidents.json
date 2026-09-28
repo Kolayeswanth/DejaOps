@@ -1,22 +1,686 @@
-{
-  "id": "INC-014",
-  "date": "2026-03-04T02:14:00Z",
-  "service": "payments-api",
-  "severity": "SEV2",
-  "alert": "...",
-  "logs": "...",
-  "root_cause": "...",
-  "actions": [
-    {
-      "step": "Scaled payments-api 4→12 pods",
-      "result": "failed"
-    },
-    {
-      "step": "Restarted pgbouncer",
-      "result": "worked"
-    }
-  ],
-  "resolution_minutes": 47,
-  "runbook": "RB-12",
-  "postmortem": "..."
-}
+[
+  {
+    "id": "INC-001",
+    "date": "2026-01-05T03:41:00Z",
+    "service": "postgres",
+    "severity": "SEV2",
+    "alert": "[FIRING] PostgresDiskUsageHigh: postgres-primary-0 /var/lib/postgresql at 96% and growing",
+    "logs": "2026-01-05T03:36:44Z WARN postgres-primary-0 checkpointer: checkpoints are occurring too frequently (14 seconds apart)\n2026-01-05T03:38:09Z WARN postgres-primary-0 pg_wal directory size 212GB exceeds wal_keep threshold\n2026-01-05T03:40:17Z ERROR postgres-primary-0 could not write to file 'pg_wal/xlogtemp.212': No space left on device\n2026-01-05T03:40:18Z FATAL postgres-primary-0 could not write to log file 00000001000000A4000000C3 at offset 8388608: No space left on device\n2026-01-05T03:40:21Z ERROR payments-api-6c8d7f5b9-m2xkq psycopg2.OperationalError: server closed the connection unexpectedly\n2026-01-05T03:40:25Z ERROR payments-api-6c8d7f5b9-9tqzd write failed: cannot execute INSERT in a read-only transaction",
+    "root_cause": "An abandoned logical replication slot (analytics_replica_old) from a decommissioned reporting replica kept retaining WAL, filling the primary's data volume.",
+    "actions": [
+      {
+        "step": "Deleted old application log files from the postgres PVC",
+        "result": "failed"
+      },
+      {
+        "step": "Dropped abandoned replication slot analytics_replica_old and ran CHECKPOINT",
+        "result": "worked"
+      },
+      {
+        "step": "Expanded postgres-primary-0 PVC from 500Gi to 750Gi",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 62,
+    "runbook": "RB-22",
+    "postmortem": "A replication slot left behind after the analytics replica was retired retained WAL for weeks until the disk filled. Freeing log files did nothing because WAL was the real consumer. We added an alert on replication slot lag and a checklist item to drop slots when decommissioning replicas."
+  },
+  {
+    "id": "INC-002",
+    "date": "2026-01-13T01:52:00Z",
+    "service": "payments-api",
+    "severity": "SEV2",
+    "alert": "[FIRING] payments-api p99 latency > 8s and 5xx rate at 22% for 5 minutes",
+    "logs": "2026-01-13T01:47:03Z INFO nightly-settlement-batch-28941120-xk7pw starting reconciliation, opening 140 DB connections\n2026-01-13T01:49:31Z ERROR payments-api-6c8d7f5b9-m2xkq psycopg2.OperationalError: connection pool exhausted (max_client_conn=200)\n2026-01-13T01:49:33Z WARN pgbouncer-0 no more connections allowed (max_client_conn)\n2026-01-13T01:50:02Z ERROR payments-api-6c8d7f5b9-9tqzd timeout acquiring connection from pool after 30000ms\n2026-01-13T01:50:40Z ERROR payments-api-6c8d7f5b9-v8n2c POST /v1/charges 500 duration=30004ms\n2026-01-13T01:51:15Z WARN pgbouncer-0 stats: cl_active=200 cl_waiting=187 sv_active=40 sv_idle=0",
+    "root_cause": "The nightly settlement batch job opened about 140 long-lived connections through pgbouncer, leaving no client slots for live payments-api traffic.",
+    "actions": [
+      {
+        "step": "Scaled payments-api 4 to 12 pods",
+        "result": "failed"
+      },
+      {
+        "step": "Restarted pgbouncer and paused the nightly-settlement-batch CronJob",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 74,
+    "runbook": "RB-07",
+    "postmortem": "The settlement batch and live traffic share one pgbouncer pool. Scaling pods only added more clients competing for the same saturated pool and made errors worse. We will move the batch job to its own pool and add an alert on pgbouncer cl_waiting."
+  },
+  {
+    "id": "INC-003",
+    "date": "2026-01-21T14:08:00Z",
+    "service": "checkout-service",
+    "severity": "SEV3",
+    "alert": "[FIRING] checkout-service intermittent 502s, DNS lookup failures to payments-api.northwind.svc",
+    "logs": "2026-01-21T14:03:12Z ERROR checkout-service-5f7b8c9d4-hq6wz getaddrinfo EAI_AGAIN payments-api.northwind.svc.cluster.local\n2026-01-21T14:03:44Z ERROR checkout-service-5f7b8c9d4-t2k9m dial tcp: lookup payments-api.northwind.svc: i/o timeout\n2026-01-21T14:04:20Z WARN coredns-7c65d6cfc9-l5x8v [ERROR] plugin/errors: 2 payments-api.northwind.svc. A: read udp i/o timeout\n2026-01-21T14:05:01Z INFO kubelet ip-10-0-2-31 evicting pod coredns-7c65d6cfc9-r4d2j due to node drain\n2026-01-21T14:06:30Z WARN coredns-7c65d6cfc9-l5x8v CPU throttling detected, 1 replica remaining",
+    "root_cause": "A node drain evicted one of two CoreDNS replicas. The single remaining replica was CPU throttled under cluster-wide DNS load.",
+    "actions": [
+      {
+        "step": "Restarted checkout-service pods",
+        "result": "failed"
+      },
+      {
+        "step": "Scaled coredns from 2 to 4 replicas",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 28,
+    "runbook": "RB-25",
+    "postmortem": "CoreDNS was running with only two replicas and no PodDisruptionBudget, so a routine drain cut DNS capacity in half. We added a PDB and moved CoreDNS to four replicas spread across zones."
+  },
+  {
+    "id": "INC-004",
+    "date": "2026-01-30T09:26:00Z",
+    "service": "checkout-service",
+    "severity": "SEV2",
+    "alert": "[FIRING] checkout-service cart writes failing: redis READONLY errors above 40%",
+    "logs": "2026-01-30T09:21:10Z WARN redis-master-0 memory usage 98%, evicting keys under maxmemory-policy allkeys-lru\n2026-01-30T09:22:03Z ERROR redis-sentinel-1 +sdown master mymaster 10.0.4.17 6379\n2026-01-30T09:22:19Z INFO redis-sentinel-0 +switch-master mymaster 10.0.4.17 6379 10.0.4.22 6379\n2026-01-30T09:22:41Z ERROR checkout-service-5f7b8c9d4-hq6wz ReplyError: READONLY You can't write against a read only replica.\n2026-01-30T09:22:58Z ERROR checkout-service-5f7b8c9d4-t2k9m cart:session:88213 write failed after 3 retries\n2026-01-30T09:24:07Z WARN redis-master-0 CrashLoopBackOff: OOMKilled",
+    "root_cause": "The self-hosted Redis master hit its memory limit and was OOM killed. Sentinel promoted a replica, but checkout-service kept a cached connection to the old master address.",
+    "actions": [
+      {
+        "step": "Restarted redis-master-0 pod",
+        "result": "failed"
+      },
+      {
+        "step": "Ran SENTINEL failover mymaster and confirmed redis-replica-1 as master",
+        "result": "worked"
+      },
+      {
+        "step": "Rolling restart of checkout-service to refresh cached master address",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 39,
+    "runbook": "RB-12",
+    "postmortem": "The old master kept crashing on memory pressure, so restarting it wasted ten minutes. The real fix was completing the promotion and forcing clients to reconnect. We raised the Redis memory limit and added sentinel-aware client config."
+  },
+  {
+    "id": "INC-005",
+    "date": "2026-02-07T06:15:00Z",
+    "service": "checkout-service",
+    "severity": "SEV1",
+    "alert": "[FIRING] BlackboxProbe: checkout.northwindpayments.example SSL certificate has expired",
+    "logs": "2026-02-07T06:10:02Z ERROR ingress-nginx-controller-6d8f7c-x9k2p SSL_do_handshake() failed (SSL: error:0A000086:SSL routines::certificate verify failed) while SSL handshaking\n2026-02-07T06:11:15Z ERROR blackbox-exporter-0 probe failed: x509: certificate has expired or is not yet valid\n2026-02-07T06:11:48Z WARN cert-manager-5b9c7d8f4-w7tnm Certificate checkout-tls renewal failed: challenge 'checkout-tls-1-3492810' is pending\n2026-02-07T06:12:20Z ERROR cert-manager-5b9c7d8f4-w7tnm ACME HTTP-01 self check failed: 404 for /.well-known/acme-challenge/\n2026-02-07T06:13:05Z ERROR checkout-service-5f7b8c9d4-hq6wz upstream connect error: tls: expired certificate\n2026-02-07T06:14:30Z WARN ingress-nginx-controller-6d8f7c-x9k2p 4821 client TLS errors in the last 60s",
+    "root_cause": "cert-manager could not renew the checkout-tls certificate because a new ingress rule intercepted the ACME HTTP-01 challenge path, so the certificate expired unnoticed.",
+    "actions": [
+      {
+        "step": "Restarted ingress-nginx controller pods",
+        "result": "failed"
+      },
+      {
+        "step": "Fixed ACME solver path routing and ran cmctl renew checkout-tls",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 51,
+    "runbook": "RB-19",
+    "postmortem": "A path-based ingress rule added two weeks earlier blocked the ACME challenge, and no alert warned us before expiry. We added a certificate-expiry alert at 14 days and a test that checks the challenge path."
+  },
+  {
+    "id": "INC-006",
+    "date": "2026-02-14T17:33:00Z",
+    "service": "payments-api",
+    "severity": "SEV2",
+    "alert": "[FIRING] payments-api acquirer gateway returning 429 Too Many Requests, auth success rate down to 71%",
+    "logs": "2026-02-14T17:28:11Z WARN payments-api-6c8d7f5b9-m2xkq acquirer POST /authorize 429 Too Many Requests retry-after=2\n2026-02-14T17:28:40Z ERROR payments-api-6c8d7f5b9-9tqzd acquirer rate limit exceeded: 1200 req/min quota\n2026-02-14T17:29:22Z WARN payments-api-6c8d7f5b9-v8n2c circuit breaker acquirer-gateway half-open\n2026-02-14T17:30:05Z ERROR payments-api-6c8d7f5b9-m2xkq authorization failed for order 9f2c1a: upstream throttled\n2026-02-14T17:31:47Z INFO metrics acquirer_requests_per_min=1840 quota=1200 (Valentine's Day traffic spike)",
+    "root_cause": "Valentine's Day traffic pushed outbound authorization calls to about 1,840 per minute, above the acquirer's 1,200 per minute quota.",
+    "actions": [
+      {
+        "step": "Replayed throttled authorizations from the dead-letter queue",
+        "result": "failed"
+      },
+      {
+        "step": "Enabled request batching and exponential backoff via feature flag",
+        "result": "worked"
+      },
+      {
+        "step": "Requested temporary quota increase from acquirer support",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 55,
+    "runbook": "RB-28",
+    "postmortem": "We had no agreed burst quota with the acquirer and no client-side rate limiting. Replaying the queue only added more throttled requests. We now enforce a client-side limiter at 80% of quota."
+  },
+  {
+    "id": "INC-007",
+    "date": "2026-02-23T11:47:00Z",
+    "service": "payments-api",
+    "severity": "SEV2",
+    "alert": "[FIRING] payments-api pods OOMKilled repeatedly, memory working set above 95% of limit",
+    "logs": "2026-02-23T11:30:02Z INFO argocd deployed payments-api v2.14.0 (rolling update complete)\n2026-02-23T11:41:18Z WARN kubelet ip-10-0-3-47 payments-api-7d9f8b6c5-x4k2p memory working set 1.8Gi / 2Gi\n2026-02-23T11:44:52Z ERROR kubelet ip-10-0-3-47 payments-api-7d9f8b6c5-x4k2p OOMKilled exit code 137\n2026-02-23T11:45:30Z WARN payments-api-7d9f8b6c5-b7n4q GC overhead: 87% of time spent in garbage collection\n2026-02-23T11:46:10Z ERROR payments-api-7d9f8b6c5-r2h6t OOMKilled exit code 137 restart count 4\n2026-02-23T11:46:45Z ERROR ingress-nginx 503 no healthy upstream payments-api",
+    "root_cause": "Release v2.14.0 introduced a memory leak: response objects were cached in an unbounded map inside the new idempotency layer.",
+    "actions": [
+      {
+        "step": "Restarted payments-api pods",
+        "result": "failed"
+      },
+      {
+        "step": "Rolled back payments-api to v2.13.4",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 33,
+    "runbook": "RB-03",
+    "postmortem": "Restarts only bought about 20 minutes each before memory climbed again, which pointed to a code regression rather than load. Rolling back to the previous release fixed it immediately. We added a memory-growth check to the canary stage."
+  },
+  {
+    "id": "INC-008",
+    "date": "2026-03-04T02:14:00Z",
+    "service": "kubernetes",
+    "severity": "SEV3",
+    "alert": "[FIRING] KubeNodeNotReady: ip-10-0-3-52 NotReady for more than 5 minutes",
+    "logs": "2026-03-04T02:07:31Z ERROR kubelet ip-10-0-3-52 PLEG is not healthy: pleg was last seen active 3m12s ago\n2026-03-04T02:09:02Z WARN node-controller node ip-10-0-3-52 status is now: NodeNotReady\n2026-03-04T02:09:44Z INFO kube-scheduler rescheduling pod checkout-service-5f7b8c9d4-p9v2k to ip-10-0-2-31\n2026-03-04T02:10:20Z WARN node-problem-detector ip-10-0-3-52 kernel: EXT4-fs error (device nvme1n1): unable to read inode block\n2026-03-04T02:11:05Z ERROR cloud-controller instance i-0a91c3e77 failed system status check",
+    "root_cause": "Underlying cloud host hardware fault caused a disk read failure on the worker node, and the kubelet stopped reporting.",
+    "actions": [
+      {
+        "step": "Rebooted the node through the cloud console",
+        "result": "failed"
+      },
+      {
+        "step": "Cordoned and drained ip-10-0-3-52 and terminated the instance so the node group replaced it",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 22,
+    "runbook": null,
+    "postmortem": "Pods were rescheduled automatically and customer impact was minimal. The reboot failed because the host itself was faulty. Replacing the node was the correct action."
+  },
+  {
+    "id": "INC-009",
+    "date": "2026-03-12T02:26:00Z",
+    "service": "checkout-service",
+    "severity": "SEV2",
+    "alert": "[FIRING] checkout-service order creation failing: FATAL remaining connection slots are reserved",
+    "logs": "2026-03-12T02:19:40Z INFO nightly-settlement-batch-29103360-c4t8n starting ledger reconciliation\n2026-03-12T02:22:11Z ERROR checkout-service-5f7b8c9d4-hq6wz FATAL: remaining connection slots are reserved for non-replication superuser connections\n2026-03-12T02:22:36Z ERROR checkout-service-5f7b8c9d4-t2k9m could not connect to server: too many clients already\n2026-03-12T02:23:02Z WARN pgbouncer-0 pool 'northwind/payments_app' is full, 214 clients waiting\n2026-03-12T02:24:15Z ERROR checkout-service-5f7b8c9d4-p9v2k POST /v1/orders 500 after 30s\n2026-03-12T02:25:20Z WARN postgres-primary-0 connections: 198 of 200 in use",
+    "root_cause": "The nightly settlement batch again consumed nearly all Postgres connections via pgbouncer, leaving live checkout traffic waiting for slots.",
+    "actions": [
+      {
+        "step": "Scaled checkout-service 6 to 14 pods",
+        "result": "failed"
+      },
+      {
+        "step": "Bounced pgbouncer and suspended the nightly reconciliation batch",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 58,
+    "runbook": "RB-07",
+    "postmortem": "More checkout pods meant more clients waiting on the same exhausted pool, so scaling did not help. The pool freed up as soon as pgbouncer was reset and the batch was paused. The batch still needs its own pool."
+  },
+  {
+    "id": "INC-010",
+    "date": "2026-03-20T15:02:00Z",
+    "service": "postgres",
+    "severity": "SEV3",
+    "alert": "[FIRING] payments-api merchant dashboard endpoint p95 latency 12s, postgres CPU at 91%",
+    "logs": "2026-03-20T14:55:12Z WARN postgres-primary-0 duration: 11482.331 ms statement: SELECT * FROM transactions WHERE merchant_id = 4412 ORDER BY created_at DESC LIMIT 100\n2026-03-20T14:56:40Z WARN postgres-primary-0 duration: 12207.918 ms statement: SELECT * FROM transactions WHERE merchant_id = 8830 ORDER BY created_at DESC LIMIT 100\n2026-03-20T14:57:03Z INFO postgres-primary-0 pg_stat_statements: seq scan on transactions (412M rows) 96 calls in last 5m\n2026-03-20T14:58:19Z WARN payments-api-6c8d7f5b9-m2xkq GET /v1/merchants/4412/transactions 200 duration=12040ms\n2026-03-20T15:00:31Z WARN postgres-primary-0 CPU 91% load average 22.4",
+    "root_cause": "A new merchant dashboard query filtered on merchant_id and created_at with no supporting index, causing full sequential scans of a 412M row table.",
+    "actions": [
+      {
+        "step": "Ran ANALYZE on transactions",
+        "result": "failed"
+      },
+      {
+        "step": "Created index CONCURRENTLY on transactions(merchant_id, created_at DESC)",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 36,
+    "runbook": null,
+    "postmortem": "The dashboard feature shipped without a query plan review on production-sized data. Refreshing statistics did not change the plan. The concurrent index build fixed latency without locking writes."
+  },
+  {
+    "id": "INC-011",
+    "date": "2026-03-29T20:11:00Z",
+    "service": "checkout-service",
+    "severity": "SEV2",
+    "alert": "[FIRING] checkout-service redis connection errors, cart service degraded, sentinel reports no quorum",
+    "logs": "2026-03-29T20:04:52Z WARN redis-sentinel-2 +sdown sentinel 10.0.4.31 (network partition between zones b and c)\n2026-03-29T20:06:14Z ERROR redis-sentinel-0 -failover-abort-not-elected master mymaster\n2026-03-29T20:07:30Z ERROR checkout-service-5f7b8c9d4-hq6wz redis: connection pool timeout after 2000ms\n2026-03-29T20:08:02Z ERROR checkout-service-5f7b8c9d4-t2k9m READONLY You can't write against a read only replica.\n2026-03-29T20:09:11Z INFO redis-sentinel-1 +odown master mymaster 10.0.4.22 6379 #quorum 1/2\n2026-03-29T20:10:05Z ERROR checkout-service-5f7b8c9d4-p9v2k cart:88213 write failed after 3 retries",
+    "root_cause": "A cross-zone network partition split the sentinels so no failover could reach quorum. The master became unreachable to some clients and a replica was left serving read-only.",
+    "actions": [
+      {
+        "step": "Restarted checkout-service pods",
+        "result": "failed"
+      },
+      {
+        "step": "Manually ran SENTINEL failover mymaster per the Redis runbook and re-pointed clients at the new master",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 44,
+    "runbook": "RB-12",
+    "postmortem": "Two sentinels lost contact across zones and could not elect a leader, so failover had to be forced by hand. Restarting the application did nothing because the Redis topology itself was broken. This was a factor in deciding to move to managed Redis."
+  },
+  {
+    "id": "INC-012",
+    "date": "2026-04-06T10:38:00Z",
+    "service": "kubernetes",
+    "severity": "SEV3",
+    "alert": "[FIRING] NodeFilesystemAlmostFull: ip-10-0-2-19 /var/log at 94%",
+    "logs": "2026-04-06T10:30:14Z WARN node-exporter ip-10-0-2-19 filesystem /var/log 94% used\n2026-04-06T10:32:41Z ERROR fluent-bit-zq8vd [output:es:es.0] HTTP status=429 buffer full, retrying\n2026-04-06T10:33:20Z WARN fluent-bit-zq8vd storage buffer at 2.1GB, chunks queued 48211\n2026-04-06T10:34:02Z INFO payments-api-6c8d7f5b9-m2xkq DEBUG request_id=7a1c full payload logged (LOG_LEVEL=debug)\n2026-04-06T10:35:37Z WARN kubelet ip-10-0-2-19 eviction manager: attempting to reclaim ephemeral-storage",
+    "root_cause": "payments-api was accidentally left at LOG_LEVEL=debug after a troubleshooting session, producing huge container logs that filled the node's log volume.",
+    "actions": [
+      {
+        "step": "Restarted fluent-bit daemonset",
+        "result": "failed"
+      },
+      {
+        "step": "Set LOG_LEVEL=info on payments-api and truncated oversized container logs on the node",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 31,
+    "runbook": "RB-22",
+    "postmortem": "A debug flag from a previous investigation was never reverted. Restarting the log shipper did not free any space. We added log-size limits in the container runtime and a policy check that rejects LOG_LEVEL=debug in production."
+  },
+  {
+    "id": "INC-013",
+    "date": "2026-04-14T13:05:00Z",
+    "service": "payments-api",
+    "severity": "SEV1",
+    "alert": "[FIRING] payments-api mTLS handshake failures to acquirer, 100% of authorizations failing",
+    "logs": "2026-04-14T13:00:02Z ERROR payments-api-6c8d7f5b9-m2xkq tls: failed to verify client certificate: x509: certificate has expired or is not yet valid: current time 2026-04-14T13:00:02Z is after 2026-04-14T12:59:59Z\n2026-04-14T13:00:05Z ERROR payments-api-6c8d7f5b9-9tqzd acquirer handshake error: remote error: tls: bad certificate\n2026-04-14T13:01:11Z ERROR payments-api-6c8d7f5b9-v8n2c authorization failed for order 55c03e: TLS handshake failure\n2026-04-14T13:02:48Z WARN payments-api-6c8d7f5b9-m2xkq circuit breaker acquirer-gateway OPEN\n2026-04-14T13:03:30Z INFO secret payments-acquirer-client-cert notAfter=2026-04-14T12:59:59Z",
+    "root_cause": "The mutual TLS client certificate used to call the acquirer was managed manually, outside cert-manager, and expired without any reminder.",
+    "actions": [
+      {
+        "step": "Restarted payments-api pods to reload the certificate",
+        "result": "failed"
+      },
+      {
+        "step": "Installed the renewed client certificate from the secrets vault and rolled payments-api",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 41,
+    "runbook": "RB-19",
+    "postmortem": "The client certificate lived in a hand-created Kubernetes secret with no expiry tracking. Restarting pods reloaded the same expired certificate. We moved the certificate under automated renewal and added expiry alerts."
+  },
+  {
+    "id": "INC-014",
+    "date": "2026-04-22T08:47:00Z",
+    "service": "checkout-service",
+    "severity": "SEV3",
+    "alert": "[FIRING] checkout-service latency high, HPA stuck at 2 replicas during morning traffic",
+    "logs": "2026-04-22T08:38:10Z WARN hpa-controller checkout-service current CPU 187% of target, desired replicas 9\n2026-04-22T08:38:11Z WARN hpa-controller desired replicas 9 exceeds maxReplicas 2, capping\n2026-04-22T08:41:02Z ERROR checkout-service-5f7b8c9d4-hq6wz request queue depth 412, latency p95=5.2s\n2026-04-22T08:43:19Z WARN checkout-service-5f7b8c9d4-t2k9m readiness probe failed: timeout\n2026-04-22T08:45:33Z INFO argocd checkout-service HPA out of sync (values drift)",
+    "root_cause": "A Helm values change overwrote the HPA and reset maxReplicas from 12 to 2, so the service could not scale for the morning traffic peak.",
+    "actions": [
+      {
+        "step": "Restarted checkout-service pods",
+        "result": "failed"
+      },
+      {
+        "step": "Patched HPA maxReplicas to 12 and corrected the Helm values file",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 26,
+    "runbook": null,
+    "postmortem": "The autoscaler was doing its job but was capped by a bad config value. The fix was in configuration, not capacity. We added a CI check that fails if maxReplicas drops below a floor."
+  },
+  {
+    "id": "INC-015",
+    "date": "2026-05-01T16:20:00Z",
+    "service": "checkout-service",
+    "severity": "SEV2",
+    "alert": "[FIRING] checkout-service pods restarting, container memory near limit, OOMKilled count rising",
+    "logs": "2026-05-01T16:02:00Z INFO argocd deployed checkout-service v3.8.1\n2026-05-01T16:12:44Z WARN kubelet ip-10-0-2-31 checkout-service-5f7b8c9d4-hq6wz memory working set 480Mi / 512Mi\n2026-05-01T16:14:03Z ERROR kubelet ip-10-0-2-31 checkout-service-5f7b8c9d4-hq6wz OOMKilled exit code 137\n2026-05-01T16:16:27Z ERROR kubelet ip-10-0-2-47 checkout-service-5f7b8c9d4-t2k9m OOMKilled exit code 137\n2026-05-01T16:18:50Z WARN checkout-service-5f7b8c9d4-p9v2k heap growing linearly, 11MB/min since deploy\n2026-05-01T16:19:30Z ERROR ingress-nginx 502 upstream checkout-service unavailable",
+    "root_cause": "Release v3.8.1 leaked memory: session objects created by a new cart-merge feature were never released.",
+    "actions": [
+      {
+        "step": "Raised checkout-service memory limit from 512Mi to 1Gi",
+        "result": "failed"
+      },
+      {
+        "step": "Rolled back checkout-service to v3.8.0",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 29,
+    "runbook": "RB-03",
+    "postmortem": "The larger memory limit only delayed the same crash by about 25 minutes. Because the leak started at the deploy, rollback was the fastest fix. Same signature as the February payments-api incident."
+  },
+  {
+    "id": "INC-016",
+    "date": "2026-05-09T04:12:00Z",
+    "service": "payments-api",
+    "severity": "SEV2",
+    "alert": "[FIRING] refund-processor duplicate refund detected: 37 refunds issued twice",
+    "logs": "2026-05-09T04:00:03Z INFO cronjob-controller created Job refund-batch-29148000\n2026-05-09T04:05:11Z INFO cronjob-controller created Job refund-batch-29148005 (previous run still active)\n2026-05-09T04:06:42Z WARN refund-batch-29148000-b7x2q processed 1204 refunds so far\n2026-05-09T04:07:15Z WARN refund-batch-29148005-m4k9r processed 640 refunds so far (overlapping window)\n2026-05-09T04:09:30Z ERROR reconciliation-worker-0 duplicate refund detected for payment pay_8f21c: 2 successful refunds\n2026-05-09T04:10:02Z ERROR reconciliation-worker-0 37 duplicates flagged, total 4218.60 USD",
+    "root_cause": "The refund batch CronJob had concurrencyPolicy set to Allow, and a slow run overlapped the next scheduled run, so both processed the same refund rows.",
+    "actions": [
+      {
+        "step": "Deleted the second refund-batch Job object",
+        "result": "failed"
+      },
+      {
+        "step": "Killed the overlapping pods and set concurrencyPolicy to Forbid",
+        "result": "worked"
+      },
+      {
+        "step": "Voided 37 duplicate refund records and notified finance",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 88,
+    "runbook": null,
+    "postmortem": "Two runs raced on the same rows and there was no idempotency key on refunds. Deleting the Job object did not stop pods that had already committed. We added idempotency keys and enforced Forbid on all batch CronJobs."
+  },
+  {
+    "id": "INC-017",
+    "date": "2026-05-17T02:35:00Z",
+    "service": "payments-api",
+    "severity": "SEV1",
+    "alert": "[FIRING] payments-api timeout waiting for DB connection, checkout success rate below 60%",
+    "logs": "2026-05-17T02:28:19Z INFO nightly-settlement-batch-29160480-j8v3d started, 160 workers\n2026-05-17T02:30:41Z ERROR payments-api-6c8d7f5b9-m2xkq sqlalchemy.exc.TimeoutError: QueuePool limit of size 20 overflow 10 reached, connection timed out, timeout 30.00\n2026-05-17T02:31:08Z WARN pgbouncer-0 stats: cl_waiting=312 sv_active=50 maxwait=41\n2026-05-17T02:31:52Z ERROR payments-api-6c8d7f5b9-9tqzd POST /v1/charges 504 duration=30001ms\n2026-05-17T02:32:30Z WARN postgres-primary-0 connections: 199 of 200 in use\n2026-05-17T02:33:44Z ERROR payments-api-6c8d7f5b9-v8n2c health check failing: cannot acquire DB connection",
+    "root_cause": "Nightly settlement batch again saturated the shared pgbouncer pool, starving live payments-api requests of server connections.",
+    "actions": [
+      {
+        "step": "Scaled payments-api 5 to 15 pods",
+        "result": "failed"
+      },
+      {
+        "step": "Raised Postgres max_connections from 200 to 400",
+        "result": "failed"
+      },
+      {
+        "step": "Restarted pgbouncer and paused the nightly-settlement-batch CronJob",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 66,
+    "runbook": "RB-07",
+    "postmortem": "Two ineffective fixes cost about 35 minutes: more pods and a higher max_connections both increased pressure on the same pool. Pausing the batch and resetting pgbouncer restored service within minutes. The batch job's pool separation is still not done."
+  },
+  {
+    "id": "INC-018",
+    "date": "2026-05-26T12:44:00Z",
+    "service": "kubernetes",
+    "severity": "SEV2",
+    "alert": "[FIRING] CoreDNSCrashLooping: coredns pods restarting, service discovery failing cluster-wide",
+    "logs": "2026-05-26T12:38:02Z INFO helm upgrade coredns config: added rewrite rule for legacy hostnames\n2026-05-26T12:39:11Z FATAL coredns-7c65d6cfc9-l5x8v plugin/rewrite: invalid rewrite rule: unknown field 'legacy'\n2026-05-26T12:39:12Z ERROR coredns-7c65d6cfc9-l5x8v Corefile:14 - Error during parsing\n2026-05-26T12:40:30Z WARN kubelet ip-10-0-2-31 coredns-7c65d6cfc9-l5x8v CrashLoopBackOff restart 4\n2026-05-26T12:41:15Z ERROR checkout-service-5f7b8c9d4-hq6wz dial tcp: lookup payments-api.northwind.svc: no such host\n2026-05-26T12:42:40Z ERROR payments-api-6c8d7f5b9-m2xkq lookup redis-master.northwind.svc: server misbehaving",
+    "root_cause": "A change to the CoreDNS Corefile ConfigMap contained an invalid rewrite rule, so every CoreDNS pod crashed on startup.",
+    "actions": [
+      {
+        "step": "Restarted coredns pods",
+        "result": "failed"
+      },
+      {
+        "step": "Reverted the Corefile ConfigMap to the previous revision and rolled coredns",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 35,
+    "runbook": "RB-25",
+    "postmortem": "The bad config was applied to all replicas at once with no validation. Restarting pods just re-read the same broken file. We added corefile validation to CI and a staged rollout for DNS changes."
+  },
+  {
+    "id": "INC-019",
+    "date": "2026-06-03T09:50:00Z",
+    "service": "payments-api",
+    "severity": "SEV2",
+    "alert": "[FIRING] payments-api DB auth failures: password authentication failed for user payments_app",
+    "logs": "2026-06-03T09:41:00Z INFO vault rotated database credential payments_app (scheduled 90-day rotation)\n2026-06-03T09:44:12Z ERROR payments-api-6c8d7f5b9-m2xkq FATAL: password authentication failed for user 'payments_app'\n2026-06-03T09:44:14Z ERROR payments-api-6c8d7f5b9-9tqzd FATAL: password authentication failed for user 'payments_app'\n2026-06-03T09:45:30Z WARN pgbouncer-0 login failed: user 'payments_app' password mismatch\n2026-06-03T09:47:08Z ERROR payments-api-6c8d7f5b9-v8n2c health check failing: cannot authenticate to database\n2026-06-03T09:48:20Z INFO vault new credential version 14 active, old version 13 revoked",
+    "root_cause": "Vault rotated the database password, but payments-api read it once at startup from an environment variable, so running pods kept using the revoked password.",
+    "actions": [
+      {
+        "step": "Checked pg_hba.conf for recent changes",
+        "result": "failed"
+      },
+      {
+        "step": "Rolling restart of payments-api to pick up rotated Vault secret",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 24,
+    "runbook": null,
+    "postmortem": "Nothing was wrong with Postgres. The application never reloaded rotated credentials. We moved to a Vault agent sidecar that refreshes the secret in place."
+  },
+  {
+    "id": "INC-020",
+    "date": "2026-06-14T11:29:00Z",
+    "service": "checkout-service",
+    "severity": "SEV2",
+    "alert": "[FIRING] checkout-service redis errors: READONLY after managed Redis primary switch",
+    "logs": "2026-06-14T11:20:05Z INFO managed-redis northwind-cache-prod maintenance event: primary replaced, promoting replica in zone b\n2026-06-14T11:21:40Z ERROR checkout-service-5f7b8c9d4-hq6wz ReplyError: READONLY You can't write against a read only replica.\n2026-06-14T11:22:18Z ERROR checkout-service-5f7b8c9d4-t2k9m cart:99120 write failed after 3 retries\n2026-06-14T11:23:02Z WARN oncall-bot user ran: redis-cli -h redis-sentinel SENTINEL failover mymaster\n2026-06-14T11:23:03Z ERROR redis-cli Could not connect to Redis at redis-sentinel:26379: Name or service not known\n2026-06-14T11:25:30Z ERROR checkout-service-5f7b8c9d4-p9v2k connection reset by peer 10.0.6.14:6379",
+    "root_cause": "The managed Redis primary was replaced during a provider maintenance event. Clients kept connections to the old endpoint address and kept getting READONLY responses.",
+    "actions": [
+      {
+        "step": "Followed old runbook RB-12: ran SENTINEL failover mymaster",
+        "result": "failed"
+      },
+      {
+        "step": "Followed RB-31: verified the new primary in the managed Redis console",
+        "result": "worked"
+      },
+      {
+        "step": "Rolled checkout-service pods so clients re-resolved the managed endpoint DNS",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 52,
+    "runbook": "RB-31",
+    "postmortem": "This was the first Redis failover since the migration to managed Redis. The on-call engineer followed RB-12, which no longer applies because there are no sentinels to command. RB-12 was marked deprecated and RB-31 is now the only valid path."
+  },
+  {
+    "id": "INC-021",
+    "date": "2026-06-22T14:18:00Z",
+    "service": "payments-api",
+    "severity": "SEV3",
+    "alert": "[FIRING] payments-api fraud-scoring API returning 429, checkout latency elevated",
+    "logs": "2026-06-22T14:10:22Z WARN payments-api-6c8d7f5b9-m2xkq fraud-score POST /v2/score 429 Too Many Requests\n2026-06-22T14:11:05Z WARN payments-api-6c8d7f5b9-9tqzd fraud-score retry attempt 5 of 5 failed\n2026-06-22T14:12:48Z ERROR payments-api-6c8d7f5b9-v8n2c fraud-score timeout, falling back to manual review queue\n2026-06-22T14:14:30Z INFO metrics fraud_score_requests_per_sec=310 vendor_limit=200\n2026-06-22T14:16:11Z WARN manual-review-queue depth 1,940 (normal < 100)",
+    "root_cause": "A new retry policy of five attempts multiplied outbound calls to the third-party fraud-scoring vendor beyond its 200 requests per second limit.",
+    "actions": [
+      {
+        "step": "Increased retry attempts from 5 to 8",
+        "result": "failed"
+      },
+      {
+        "step": "Enabled 60-second fraud score cache and reduced retries to 2 with jitter",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 47,
+    "runbook": "RB-28",
+    "postmortem": "Aggressive retries turned a small overage into a storm of throttled calls, and raising them made it worse. Caching repeat scores and adding jitter brought the call rate back under the vendor limit."
+  },
+  {
+    "id": "INC-022",
+    "date": "2026-07-01T07:56:00Z",
+    "service": "payments-api",
+    "severity": "SEV1",
+    "alert": "[FIRING] checkout-service to payments-api gRPC calls failing: x509 certificate has expired",
+    "logs": "2026-07-01T07:50:01Z ERROR checkout-service-5f7b8c9d4-hq6wz rpc error: code = Unavailable desc = connection error: transport: authentication handshake failed: x509: certificate has expired or is not yet valid\n2026-07-01T07:50:04Z ERROR checkout-service-5f7b8c9d4-t2k9m grpc call PaymentService/Charge failed: tls: expired certificate\n2026-07-01T07:51:22Z ERROR payments-api-6c8d7f5b9-m2xkq tls: client certificate expired 2026-07-01T07:49:59Z\n2026-07-01T07:52:40Z WARN cert-manager-5b9c7d8f4-w7tnm renewal CronJob is suspended for issuer internal-ca\n2026-07-01T07:54:15Z ERROR ingress-nginx 503 upstream payments-api connection refused",
+    "root_cause": "The internal-ca certificate renewal job had been suspended during the Redis migration and never re-enabled, so the service-to-service certificate expired.",
+    "actions": [
+      {
+        "step": "Restarted checkout-service pods",
+        "result": "failed"
+      },
+      {
+        "step": "Renewed the certificate with cmctl renew, re-enabled cert-manager renewal, and rolled both services",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 38,
+    "runbook": "RB-19",
+    "postmortem": "A temporary suspension during migration work was forgotten. This was our third expired-certificate incident this year. We now alert on any suspended renewal job and on certificates with less than 14 days remaining."
+  },
+  {
+    "id": "INC-023",
+    "date": "2026-07-10T18:03:00Z",
+    "service": "kubernetes",
+    "severity": "SEV3",
+    "alert": "[FIRING] payments-api deploy stuck: pods in ImagePullBackOff",
+    "logs": "2026-07-10T17:55:02Z INFO argocd syncing payments-api v2.20.0\n2026-07-10T17:57:18Z WARN kubelet ip-10-0-3-47 Failed to pull image 'registry.northwind.example/payments-api:v2.20.0': unauthorized\n2026-07-10T17:57:19Z ERROR kubelet ip-10-0-3-47 Error: ErrImagePull\n2026-07-10T17:59:30Z WARN kubelet ip-10-0-3-47 Back-off pulling image, ImagePullBackOff\n2026-07-10T18:01:44Z INFO argocd payments-api rollout progress 0/4 updated, old pods still serving",
+    "root_cause": "The registry pull secret used by the cluster had expired, so new images could not be pulled.",
+    "actions": [
+      {
+        "step": "Re-ran the deploy from ArgoCD",
+        "result": "failed"
+      },
+      {
+        "step": "Rotated the registry pull secret in all namespaces",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 19,
+    "runbook": null,
+    "postmortem": "Old pods kept serving so there was no customer impact, but the deploy was blocked. Retrying the sync cannot fix an authentication problem. We set a calendar alert for pull secret expiry."
+  },
+  {
+    "id": "INC-024",
+    "date": "2026-07-19T13:41:00Z",
+    "service": "payments-api",
+    "severity": "SEV2",
+    "alert": "[FIRING] payments-api memory usage climbing steadily after release, pods being OOMKilled",
+    "logs": "2026-07-19T13:15:00Z INFO argocd deployed payments-api v2.19.2\n2026-07-19T13:32:10Z WARN kubelet ip-10-0-2-47 payments-api-7d9f8b6c5-x4k2p memory working set 1.7Gi / 2Gi\n2026-07-19T13:35:41Z ERROR kubelet ip-10-0-2-47 payments-api-7d9f8b6c5-x4k2p OOMKilled exit code 137\n2026-07-19T13:37:20Z WARN payments-api-7d9f8b6c5-b7n4q open http client sessions: 41,882 (baseline 300)\n2026-07-19T13:39:55Z ERROR kubelet ip-10-0-3-47 payments-api-7d9f8b6c5-r2h6t OOMKilled exit code 137\n2026-07-19T13:40:30Z ERROR ingress-nginx 502 upstream payments-api unavailable",
+    "root_cause": "Release v2.19.2 created a new HTTP client session per request to the acquirer and never closed it, leaking memory and sockets.",
+    "actions": [
+      {
+        "step": "Enabled heap dump and restarted payments-api pods",
+        "result": "failed"
+      },
+      {
+        "step": "Rolled back payments-api to v2.19.1",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 27,
+    "runbook": "RB-03",
+    "postmortem": "Memory climbed steadily from the moment of deploy, the same signature as earlier leaks, so we rolled back first and investigated afterwards. The heap dump showed unclosed sessions. A leak check is now part of the canary."
+  },
+  {
+    "id": "INC-025",
+    "date": "2026-07-28T10:22:00Z",
+    "service": "postgres",
+    "severity": "SEV3",
+    "alert": "[FIRING] PostgresReplicationLag: postgres-replica-1 lag 340s, reporting dashboards stale",
+    "logs": "2026-07-28T10:12:30Z WARN postgres-replica-1 replication lag 96s\n2026-07-28T10:15:44Z WARN postgres-replica-1 replication lag 211s\n2026-07-28T10:17:02Z ERROR postgres-replica-1 canceling statement due to conflict with recovery\n2026-07-28T10:18:39Z INFO postgres-replica-1 pid 28841 running for 1h04m: SELECT ... FROM transactions t JOIN settlements s ... (role reporting_ro)\n2026-07-28T10:20:11Z WARN postgres-replica-1 replication lag 340s",
+    "root_cause": "A long-running analytics query from the reporting role held back WAL replay on the replica, causing growing replication lag.",
+    "actions": [
+      {
+        "step": "Restarted postgres-replica-1",
+        "result": "failed"
+      },
+      {
+        "step": "Terminated long-running query pid 28841 and set statement_timeout for the reporting role",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 42,
+    "runbook": null,
+    "postmortem": "The replica was healthy but blocked by one heavy query. A restart only forced a full resync. We added a statement timeout for reporting roles and moved heavy reports to a dedicated replica."
+  },
+  {
+    "id": "INC-026",
+    "date": "2026-08-06T21:07:00Z",
+    "service": "payments-api",
+    "severity": "SEV3",
+    "alert": "[FIRING] ingress-nginx sporadic 502 Bad Gateway from payments-api at 1.4% of requests",
+    "logs": "2026-08-06T20:58:12Z ERROR ingress-nginx-controller-6d8f7c-x9k2p upstream prematurely closed connection while reading response header from upstream, upstream: http://10.0.5.41:8080\n2026-08-06T20:59:40Z ERROR ingress-nginx-controller-6d8f7c-x9k2p recv() failed (104: Connection reset by peer) while reading response header\n2026-08-06T21:01:05Z INFO payments-api-6c8d7f5b9-m2xkq server idle timeout closing connection after 5s\n2026-08-06T21:02:31Z WARN ingress-nginx-controller-6d8f7c-x9k2p upstream keepalive timeout 60s\n2026-08-06T21:04:18Z INFO metrics 502 rate 1.4% affecting long-lived keepalive connections only",
+    "root_cause": "payments-api closed idle connections after 5 seconds while the ingress reused keepalive connections for up to 60 seconds, so requests were sent on connections the server had just closed.",
+    "actions": [
+      {
+        "step": "Restarted ingress-nginx pods",
+        "result": "failed"
+      },
+      {
+        "step": "Set payments-api keepalive timeout to 75s, above the ingress upstream keepalive",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 57,
+    "runbook": null,
+    "postmortem": "A framework upgrade lowered the default server idle timeout, creating a timeout mismatch with the ingress. Restarting the ingress only hid the problem for a few minutes. The rule is that the backend timeout must be longer than the proxy's."
+  },
+  {
+    "id": "INC-027",
+    "date": "2026-08-15T02:48:00Z",
+    "service": "checkout-service",
+    "severity": "SEV2",
+    "alert": "[FIRING] checkout-service DB calls hanging, pgbouncer pool saturated, orders failing",
+    "logs": "2026-08-15T02:40:18Z INFO nightly-settlement-batch-29228640-t5m2z started reconciliation window\n2026-08-15T02:43:07Z ERROR checkout-service-5f7b8c9d4-hq6wz QueuePool limit of size 20 overflow 10 reached, connection timed out, timeout 30.00\n2026-08-15T02:43:52Z WARN pgbouncer-0 pool 'northwind/payments_app' server_login_retry, cl_waiting=240\n2026-08-15T02:44:30Z ERROR checkout-service-5f7b8c9d4-t2k9m POST /v1/orders 504 duration=30002ms\n2026-08-15T02:45:41Z WARN postgres-primary-0 connections: 197 of 200 in use\n2026-08-15T02:46:12Z ERROR checkout-service-5f7b8c9d4-p9v2k readiness probe failed: db connection unavailable",
+    "root_cause": "Nightly settlement batch again exhausted the shared connection pool, leaving checkout-service waiting for a database connection.",
+    "actions": [
+      {
+        "step": "Added 6 checkout-service pods (8 to 14)",
+        "result": "failed"
+      },
+      {
+        "step": "Restarted pgbouncer and paused the nightly-settlement-batch CronJob",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 31,
+    "runbook": "RB-07",
+    "postmortem": "The on-call engineer tried scaling first, which has failed every time this has happened. Pausing the batch and restarting pgbouncer restored service in under 10 minutes once applied. The dedicated batch pool is now the top priority follow-up."
+  },
+  {
+    "id": "INC-028",
+    "date": "2026-08-25T05:33:00Z",
+    "service": "kubernetes",
+    "severity": "SEV3",
+    "alert": "[FIRING] KubeNodeDiskPressure: ip-10-0-4-12 ephemeral storage low, pods being evicted",
+    "logs": "2026-08-25T05:24:10Z WARN kubelet ip-10-0-4-12 eviction manager: nodefs.available below threshold 10%\n2026-08-25T05:25:33Z ERROR kubelet ip-10-0-4-12 evicting pod checkout-service-5f7b8c9d4-w8j3n due to DiskPressure\n2026-08-25T05:26:02Z WARN kubelet ip-10-0-4-12 image garbage collection failed: wanted to free 21474836480 bytes, but freed 0\n2026-08-25T05:28:41Z INFO node-exporter ip-10-0-4-12 /var/lib/containerd 93% used, 214 unused images\n2026-08-25T05:30:15Z ERROR kube-scheduler 0/9 nodes available: 1 node(s) had untolerated taint node.kubernetes.io/disk-pressure",
+    "root_cause": "Unused container images accumulated on the node because image garbage collection was not reclaiming space, triggering DiskPressure.",
+    "actions": [
+      {
+        "step": "Deleted evicted pods",
+        "result": "failed"
+      },
+      {
+        "step": "Ran crictl rmi --prune on the node and cleared unused images",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 24,
+    "runbook": "RB-22",
+    "postmortem": "Evicted pods are a symptom, so deleting them did not help. Pruning unused images freed 38GB. We reduced the image GC thresholds and added a larger root volume for new nodes."
+  },
+  {
+    "id": "INC-029",
+    "date": "2026-09-05T16:14:00Z",
+    "service": "checkout-service",
+    "severity": "SEV2",
+    "alert": "[FIRING] checkout-service cart write failures, managed Redis reports primary switched to replica",
+    "logs": "2026-09-05T16:07:44Z INFO managed-redis northwind-cache-prod failover completed, new primary in zone c\n2026-09-05T16:08:30Z ERROR checkout-service-5f7b8c9d4-hq6wz ReplyError: READONLY You can't write against a read only replica.\n2026-09-05T16:09:02Z ERROR checkout-service-5f7b8c9d4-t2k9m cart:99871 write failed after 3 retries\n2026-09-05T16:10:15Z WARN checkout-service-5f7b8c9d4-p9v2k redis connection pool still resolving to old endpoint 10.0.6.14\n2026-09-05T16:11:40Z INFO oncall-bot RB-31 (Managed Redis failover) attached to incident",
+    "root_cause": "A managed Redis failover completed on the provider side, but checkout-service pods cached the old endpoint address and kept writing to a replica.",
+    "actions": [
+      {
+        "step": "Verified the new primary in the managed Redis console per RB-31",
+        "result": "worked"
+      },
+      {
+        "step": "Rolled checkout-service pods to force endpoint DNS re-resolution",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 21,
+    "runbook": "RB-31",
+    "postmortem": "The on-call engineer went straight to RB-31 and skipped the deprecated sentinel steps, cutting resolution time from 52 to 21 minutes compared with the first managed failover. We are adding a DNS refresh interval to the Redis client so pods recover without a roll."
+  },
+  {
+    "id": "INC-030",
+    "date": "2026-09-20T09:37:00Z",
+    "service": "kubernetes",
+    "severity": "SEV3",
+    "alert": "[FIRING] payments-api deploy blocked: pods FailedCreate exceeded quota compute-quota",
+    "logs": "2026-09-20T09:28:04Z INFO argocd syncing payments-api v2.22.0 (replicas 6)\n2026-09-20T09:29:11Z WARN replicaset-controller payments-api-7d9f8b6c5 FailedCreate: pods 'payments-api-7d9f8b6c5-k4d8m' is forbidden: exceeded quota: compute-quota, requested: limits.memory=2Gi, used: 39Gi, limited: 40Gi\n2026-09-20T09:31:42Z WARN argocd payments-api rollout stalled at 3/6 updated\n2026-09-20T09:33:20Z INFO kubectl namespace northwind quota limits.memory 39Gi/40Gi\n2026-09-20T09:35:05Z ERROR hpa-controller unable to scale checkout-service: FailedCreate quota exceeded",
+    "root_cause": "The namespace memory ResourceQuota was too small to run old and new pods together during a rolling update after recent memory limit increases.",
+    "actions": [
+      {
+        "step": "Deleted completed Jobs to free quota",
+        "result": "failed"
+      },
+      {
+        "step": "Raised ResourceQuota limits.memory from 40Gi to 56Gi",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 17,
+    "runbook": null,
+    "postmortem": "Quota had not been revisited after memory limits were raised, so rolling updates had no headroom. Completed Jobs use no memory quota, which is why cleaning them up changed nothing. We now review quota alongside capacity planning."
+  }
+]
