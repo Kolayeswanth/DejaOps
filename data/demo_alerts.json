@@ -1,14 +1,42 @@
 [
   {
     "id": "DEMO-1",
-    "alert": "payments-api is returning 503s. Pods look Ready, but every database call just hangs waiting for a free slot. pgbouncer shows 287 clients queued and the server side pinned at its limit. Started shortly after 02:00."
+    "alert": "payments-api has started returning 503s on roughly 18% of requests, but all 12 pods are still Ready. Application traces show database operations sitting around 4.8s before a connection is assigned, while pgbouncer currently has 684 clients waiting for an available slot."
   },
   {
     "id": "DEMO-2",
-    "alert": "[FIRING] checkout-service can't save carts: 'READONLY You can't write against a read only replica'. Managed cache cluster northwind-cache-prod says its primary moved to a different node about 6 minutes ago."
+    "alert": "checkout-service started timing out shortly after the Redis primary failed today, 2026-09-28. Redis failover has not restored normal response times yet, and checkout requests are reaching 3.2s timeouts with about 14% of requests affected."
   },
   {
     "id": "DEMO-3",
-    "alert": "[FIRING] settlement-events consumer group lag above 250,000 messages on topic payment.settled. Partition 3 has stalled and consumers keep rebalancing every 30 seconds."
+    "alert": "Kafka consumer group checkout-events-prod is sitting at 587,412 messages of lag and the backlog is still increasing. The group currently has zero active members, so nothing is polling the affected partitions."
+  },
+  {
+    "id": "DEMO-4",
+    "alert": "The public Northwind Payments API is rejecting TLS connections because its certificate expired at 14:20 UTC on 2026-08-19. cert-manager shows the certificate resource as expired rather than renewed, and external probes are reporting TLS handshake failures."
+  },
+  {
+    "id": "DEMO-5",
+    "alert": "payments-api pod memory usage has been climbing continuously since the latest release, moving from about 420Mi to 1.7Gi before termination. Pods are being OOMKilled roughly every 25 minutes, and the replacement pods repeat the same growth pattern."
+  },
+  {
+    "id": "DEMO-6",
+    "alert": "Requests to the PayFlow payment gateway are now taking 8-12 seconds and frequently hitting the checkout timeout threshold. checkout-service success rate has fallen from 99.4% to 91.8% over the last 15 minutes, while internal checkout processing remains within its normal latency range."
+  },
+  {
+    "id": "DEMO-7",
+    "alert": "postgres-primary-0 is reporting 97% volume utilization and the filesystem has gained another 6.4GB in the last two hours. Multiple write operations are failing with \"No space left on device\", including attempts to create temporary database files."
+  },
+  {
+    "id": "DEMO-8",
+    "alert": "orders-api latency jumped from 180ms to 1.9s immediately after the application cache was flushed. At the same time, Postgres CPU rose from 42% to 88% and query volume nearly tripled, with the increase concentrated on orders-api traffic."
+  },
+  {
+    "id": "DEMO-9",
+    "alert": "checkout-service 5xx responses have climbed to 27% while Redis requests are timing out and Postgres query latency has risen sharply. Redis timeout rate is around 19% and several database queries are now taking 4-7 seconds, so the symptoms are occurring across multiple dependencies at once."
+  },
+  {
+    "id": "DEMO-10",
+    "alert": "The recommendation service running on the GPU node pool is repeatedly failing inference batches with CUDA out-of-memory errors. GPU memory reaches 15.8Gi of 16Gi before the process crashes, and the failures began after the recommendation workload increased from 32 to 64 concurrent requests."
   }
 ]

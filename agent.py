@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from groq import Groq
 from memory import recall_similar, record_outcome, learned_summary  # re-exported for the UI
 
-load_dotenv()
+load_dotenv(override=True)
 groq = Groq(api_key=os.environ["GROQ_API_KEY"])
 MODELS = ["openai/gpt-oss-120b", "qwen/qwen3-32b"]
 

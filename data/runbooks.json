@@ -1,100 +1,141 @@
 [
   {
     "id": "RB-03",
-    "title": "Memory leak after a bad deploy (OOMKilled pods)",
+    "title": "Memory leak after a bad deploy (OOMKilled): roll back; do not rely on restarts or bigger limits",
     "status": "active",
-    "applies_to": ["payments-api", "checkout-service", "kubernetes"],
+    "effective_from": "2026-08-01",
+    "applies_to": ["payments-api", "checkout-service", "auth-service", "orders-api"],
     "steps": [
-      "Step 1: Check whether OOMKilled restarts began right after the latest deploy (kubectl rollout history, ArgoCD sync time).",
-      "Step 2: Confirm memory grows steadily per pod (about 10 MB/min or more) rather than spiking with traffic.",
-      "Step 3: Do NOT rely on restarts or raising memory limits. They only delay the crash by 20-30 minutes.",
-      "Step 4: Roll back to the previous release: kubectl rollout undo deployment/<service> or revert the ArgoCD revision.",
-      "Step 5: Verify memory working set stays flat for 15 minutes and 5xx rate returns to baseline.",
-      "Step 6: Open a ticket with the release owner and attach a heap dump if one was captured."
+      "Step 1: Confirm the failure is deployment-related with `kubectl -n nw-prod-eu-1 get pods -o wide` and `kubectl -n nw-prod-eu-1 describe pod <pod-name> | grep -A5 -B2 OOMKilled`.",
+      "Step 2: Identify the currently deployed revision with `kubectl -n nw-prod-eu-1 rollout history deployment/payments-api` and record the revision that was healthy before the incident.",
+      "Step 3: Roll back immediately with `kubectl -n nw-prod-eu-1 rollout undo deployment/payments-api --to-revision=<healthy-revision>`; repeat for any affected service.",
+      "Step 4: Watch the rollback with `kubectl -n nw-prod-eu-1 rollout status deployment/payments-api --timeout=180s` and verify new pods stop being OOMKilled.",
+      "Step 5: Confirm memory usage and pod health with `kubectl -n nw-prod-eu-1 top pods -l app=payments-api` and `kubectl -n nw-prod-eu-1 get pods -l app=payments-api`.",
+      "Step 6: Do not treat repeated restarts or increasing container memory limits as the fix; preserve the failed image/configuration for investigation and open a follow-up incident."
     ]
   },
   {
     "id": "RB-07",
-    "title": "Postgres connection pool exhaustion",
+    "title": "Postgres connection pool exhaustion (pgbouncer): restart pgbouncer and pause the nightly batch job; scaling pods does not help",
     "status": "active",
-    "applies_to": ["payments-api", "checkout-service", "pgbouncer", "postgres"],
+    "effective_from": "2026-08-01",
+    "applies_to": ["pgbouncer", "postgres-primary-0"],
     "steps": [
-      "Step 1: Check pgbouncer stats (SHOW POOLS): cl_waiting above 50 with sv_active at pool_size means exhaustion.",
-      "Step 2: Check whether nightly-settlement-batch (or any batch job) is running and holding many connections.",
-      "Step 3: Do NOT scale up application pods or raise max_connections. This adds more clients to the same saturated pool and has failed in every past incident.",
-      "Step 4: Pause the batch: kubectl patch cronjob nightly-settlement-batch -p '{\"spec\":{\"suspend\":true}}' and delete the running job.",
-      "Step 5: Restart pgbouncer: kubectl rollout restart deployment/pgbouncer.",
-      "Step 6: Confirm cl_waiting drops to 0 and API latency recovers, then resume the batch only in the off-peak window."
+      "Step 1: Confirm pool exhaustion with `kubectl -n nw-prod-eu-1 exec deploy/pgbouncer -- psql -h 127.0.0.1 -p 6432 -U admin -d pgbouncer -c 'SHOW POOLS;'`.",
+      "Step 2: Check whether the nightly batch job is consuming connections with `kubectl -n nw-prod-eu-1 get jobs,pods -l job-type=nightly-batch`.",
+      "Step 3: Pause the nightly batch job by scaling its deployment to zero with `kubectl -n nw-prod-eu-1 scale deployment/nightly-batch --replicas=0` and confirm no new batch pods start.",
+      "Step 4: Restart pgbouncer with `kubectl -n nw-prod-eu-1 rollout restart deployment/pgbouncer` and wait using `kubectl -n nw-prod-eu-1 rollout status deployment/pgbouncer --timeout=180s`.",
+      "Step 5: Verify pooled connections recover with `kubectl -n nw-prod-eu-1 exec deploy/pgbouncer -- psql -h 127.0.0.1 -p 6432 -U admin -d pgbouncer -c 'SHOW POOLS;'`.",
+      "Step 6: Do not scale application pods as the primary mitigation; additional pods can increase database connection demand and will not resolve exhausted pgBouncer capacity."
+    ]
+  },
+  {
+    "id": "RB-09",
+    "title": "Bad config or feature-flag rollout: revert the flag/config",
+    "status": "active",
+    "effective_from": "2026-08-01",
+    "applies_to": ["payments-api", "checkout-service", "auth-service", "orders-api"],
+    "steps": [
+      "Step 1: Identify the first deployment or configuration change associated with the incident using `kubectl -n nw-prod-eu-1 rollout history deployment/checkout-service`.",
+      "Step 2: Check the active configuration with `kubectl -n nw-prod-eu-1 get configmap checkout-service-config -o yaml` and record the current flag/config values.",
+      "Step 3: Revert the feature flag or configuration to the last known-good value in the configuration management system, then apply it with `kubectl -n nw-prod-eu-1 apply -f checkout-service-config.yaml`.",
+      "Step 4: Restart the affected deployment when configuration is read only at startup with `kubectl -n nw-prod-eu-1 rollout restart deployment/checkout-service`.",
+      "Step 5: Verify the rollout using `kubectl -n nw-prod-eu-1 rollout status deployment/checkout-service --timeout=180s` and inspect application logs with `kubectl -n nw-prod-eu-1 logs deployment/checkout-service --tail=100`.",
+      "Step 6: Confirm error rates return to baseline before re-enabling the reverted flag or configuration."
     ]
   },
   {
     "id": "RB-12",
-    "title": "Redis primary failover (self-hosted Redis)",
+    "title": "Self-hosted Redis primary failover",
     "status": "deprecated",
     "deprecated_on": "2026-06-10",
     "replaced_by": "RB-31",
-    "reason": "We migrated to managed Redis, so manual failover steps no longer apply.",
-    "applies_to": ["redis", "checkout-service"],
+    "reason": "migrated to managed Redis",
+    "applies_to": ["Redis"],
     "steps": [
-      "Step 1: Check sentinel state: redis-cli -h redis-sentinel -p 26379 SENTINEL master mymaster.",
-      "Step 2: If no automatic promotion occurred, force it: SENTINEL failover mymaster.",
-      "Step 3: Confirm the new master with SENTINEL get-master-addr-by-name mymaster.",
-      "Step 4: Rolling restart checkout-service so clients drop the cached old master address.",
-      "Step 5: Investigate why the old master failed (memory, node, network) before bringing it back as a replica."
+      "Step 1: Confirm the self-hosted Redis primary is unavailable with `kubectl -n nw-prod-eu-1 get pods -l app=redis -o wide`.",
+      "Step 2: Inspect Redis replication state with `kubectl -n nw-prod-eu-1 exec redis-replica-0 -- redis-cli INFO replication` and confirm a replica is available.",
+      "Step 3: Choose the healthiest replica and promote it manually with `kubectl -n nw-prod-eu-1 exec redis-replica-0 -- redis-cli REPLICAOF NO ONE`.",
+      "Step 4: Verify the promoted instance reports `role:master` using `kubectl -n nw-prod-eu-1 exec redis-replica-0 -- redis-cli INFO replication`.",
+      "Step 5: Update the Redis Service selector or endpoint configuration to point clients at the promoted primary, then apply it with `kubectl -n nw-prod-eu-1 apply -f redis-service.yaml`.",
+      "Step 6: Restart affected application pods with `kubectl -n nw-prod-eu-1 rollout restart deployment/payments-api deployment/checkout-service` and verify Redis connectivity in their logs."
     ]
   },
   {
-    "id": "RB-19",
-    "title": "Expired or failing TLS certificate renewal",
+    "id": "RB-14",
+    "title": "Kubernetes node NotReady: cordon, drain, replace the node",
     "status": "active",
-    "applies_to": ["ingress-nginx", "cert-manager", "checkout-service", "payments-api"],
+    "effective_from": "2026-08-01",
+    "applies_to": ["nw-prod-eu-1"],
     "steps": [
-      "Step 1: Identify the expired certificate: kubectl get certificate -A and check notAfter, or inspect it with openssl s_client.",
-      "Step 2: Check cert-manager: kubectl describe certificate and challenges, and confirm the issuer's renewal job is not suspended.",
-      "Step 3: Do NOT just restart pods or ingress. They reload the same expired certificate.",
-      "Step 4: Fix the cause (ACME challenge path blocked, suspended renewal, manually managed secret) then force renewal: cmctl renew <certificate>.",
-      "Step 5: Roll affected pods so they load the new certificate and verify with openssl s_client.",
-      "Step 6: Make sure expiry alerts at 14 days exist for this certificate."
+      "Step 1: Identify the unhealthy node with `kubectl get nodes` and confirm the condition using `kubectl describe node <node-name>`.",
+      "Step 2: Prevent new workloads from landing on the node with `kubectl cordon <node-name>`.",
+      "Step 3: Drain the node with `kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data --grace-period=60 --timeout=10m`.",
+      "Step 4: Verify critical workloads rescheduled with `kubectl -n nw-prod-eu-1 get pods -o wide` and check that replacements are Ready.",
+      "Step 5: Remove or replace the failed node using the infrastructure provider's node-management command, for example `cloudctl node replace --cluster nw-prod-eu-1 --node <node-name>`.",
+      "Step 6: Confirm the replacement joins with `kubectl get nodes` and that all critical deployments report healthy rollouts."
+    ]
+  },
+  {
+    "id": "RB-15",
+    "title": "Manual TLS certificate renewal",
+    "status": "deprecated",
+    "deprecated_on": "2026-07-15",
+    "replaced_by": "RB-36",
+    "reason": "cert-manager adopted",
+    "applies_to": ["ingress-nginx"],
+    "steps": [
+      "Step 1: Check the expiring certificate with `kubectl -n nw-prod-eu-1 get secret payments-tls -o jsonpath='{.metadata.creationTimestamp}'` and inspect its validity using `openssl x509 -in cert.pem -noout -dates`.",
+      "Step 2: Generate a new certificate and private key through the approved certificate authority using `openssl req -new -newkey rsa:2048 -nodes -keyout tls.key -out tls.csr`.",
+      "Step 3: Submit the CSR to the certificate authority and retrieve the signed certificate as `tls.crt`.",
+      "Step 4: Replace the Kubernetes TLS secret with `kubectl -n nw-prod-eu-1 create secret tls payments-tls --cert=tls.crt --key=tls.key --dry-run=client -o yaml | kubectl apply -f -`.",
+      "Step 5: Verify ingress-nginx picked up the certificate with `kubectl -n nw-prod-eu-1 rollout restart deployment/ingress-nginx-controller` and `kubectl -n nw-prod-eu-1 rollout status deployment/ingress-nginx-controller --timeout=180s`.",
+      "Step 6: Confirm the served certificate with `openssl s_client -connect payments.northwind.example:443 -servername payments.northwind.example </dev/null 2>/dev/null | openssl x509 -noout -dates -issuer`."
+    ]
+  },
+  {
+    "id": "RB-18",
+    "title": "CoreDNS resolution failures",
+    "status": "active",
+    "effective_from": "2026-08-01",
+    "applies_to": ["CoreDNS", "payments-api", "checkout-service", "auth-service"],
+    "steps": [
+      "Step 1: Confirm DNS failures from an application pod with `kubectl -n nw-prod-eu-1 exec deploy/payments-api -- nslookup postgres-primary-0`.",
+      "Step 2: Check CoreDNS pods with `kubectl -n kube-system get pods -l k8s-app=kube-dns` and inspect recent errors using `kubectl -n kube-system logs -l k8s-app=kube-dns --tail=200`.",
+      "Step 3: Verify the DNS Service endpoints with `kubectl -n kube-system get svc kube-dns` and `kubectl -n kube-system get endpoints kube-dns`.",
+      "Step 4: Check CoreDNS configuration with `kubectl -n kube-system get configmap coredns -o yaml` and look for malformed forwarding or plugin configuration.",
+      "Step 5: If CoreDNS pods are unhealthy and configuration is known-good, restart them with `kubectl -n kube-system rollout restart deployment/coredns` and wait with `kubectl -n kube-system rollout status deployment/coredns --timeout=180s`.",
+      "Step 6: Re-test service discovery from multiple application pods with `nslookup postgres-primary-0` and `nslookup checkout-service` before closing the incident."
     ]
   },
   {
     "id": "RB-22",
-    "title": "Disk full on Postgres volume or Kubernetes node",
+    "title": "Postgres disk full from retained WAL (abandoned replication slot)",
     "status": "active",
-    "applies_to": ["postgres", "kubernetes", "fluent-bit"],
+    "effective_from": "2026-08-01",
+    "applies_to": ["postgres-primary-0"],
     "steps": [
-      "Step 1: Find what is consuming space: df -h, du on the volume, and pg_wal size for Postgres.",
-      "Step 2: For Postgres, check pg_replication_slots for inactive slots retaining WAL and drop abandoned ones.",
-      "Step 3: For nodes, check container logs (debug logging left on) and unused images: crictl rmi --prune.",
-      "Step 4: Do NOT delete evicted pods or restart log shippers. These do not free space.",
-      "Step 5: If space is still short, expand the PVC or add node storage.",
-      "Step 6: Add or tune alerts (replication slot lag, node filesystem at 80%)."
+      "Step 1: Confirm disk pressure with `kubectl -n nw-prod-eu-1 exec postgres-primary-0 -- df -h /var/lib/postgresql/data`.",
+      "Step 2: Inspect replication slots with `kubectl -n nw-prod-eu-1 exec postgres-primary-0 -- psql -U postgres -c \"SELECT slot_name, active, restart_lsn, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained_wal FROM pg_replication_slots;\"`.",
+      "Step 3: Identify the inactive slot retaining excessive WAL and confirm it belongs to an abandoned replica or obsolete integration before removing it.",
+      "Step 4: Drop only the confirmed abandoned slot with `kubectl -n nw-prod-eu-1 exec postgres-primary-0 -- psql -U postgres -c \"SELECT pg_drop_replication_slot('abandoned_slot');\"`.",
+      "Step 5: Recheck disk usage and WAL retention with `kubectl -n nw-prod-eu-1 exec postgres-primary-0 -- df -h /var/lib/postgresql/data` and `psql -U postgres -c 'SELECT pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) FROM pg_replication_slots;'`.",
+      "Step 6: Verify Postgres remains healthy with `kubectl -n nw-prod-eu-1 exec postgres-primary-0 -- pg_isready` and confirm application writes succeed."
     ]
   },
   {
-    "id": "RB-25",
-    "title": "DNS resolution failures (CoreDNS)",
+    "id": "RB-26",
+    "title": "Payment gateway (PayFlow) timeouts and errors",
     "status": "active",
-    "applies_to": ["kubernetes", "coredns", "checkout-service", "payments-api"],
+    "effective_from": "2026-08-01",
+    "applies_to": ["payments-api", "PayFlow"],
     "steps": [
-      "Step 1: Check CoreDNS pods: kubectl -n kube-system get pods -l k8s-app=kube-dns for CrashLoopBackOff or missing replicas.",
-      "Step 2: If pods crash, read their logs for Corefile errors and revert the ConfigMap to the previous revision.",
-      "Step 3: If pods are healthy but throttled or too few, scale coredns to at least 4 replicas.",
-      "Step 4: Do NOT restart application pods. They are not the cause.",
-      "Step 5: Verify with nslookup from a debug pod and watch the error rate return to zero."
-    ]
-  },
-  {
-    "id": "RB-28",
-    "title": "Upstream API rate limiting (429 responses)",
-    "status": "active",
-    "applies_to": ["payments-api", "acquirer-gateway", "fraud-scoring"],
-    "steps": [
-      "Step 1: Compare outbound requests per minute with the vendor's documented quota.",
-      "Step 2: Reduce call volume: enable request batching or caching, and lower retries with exponential backoff and jitter.",
-      "Step 3: Do NOT raise retry counts or replay dead-letter queues while throttled. This amplifies the problem.",
-      "Step 4: Contact the vendor for a temporary quota increase if traffic is legitimate.",
-      "Step 5: Drain the manual review or dead-letter queue slowly once error rates are normal."
+      "Step 1: Confirm elevated PayFlow errors from application logs with `kubectl -n nw-prod-eu-1 logs deployment/payments-api --since=15m | grep -Ei 'PayFlow|timeout|5[0-9][0-9]'`.",
+      "Step 2: Test outbound connectivity from a payments-api pod with `kubectl -n nw-prod-eu-1 exec deploy/payments-api -- curl -sS -o /dev/null -w '%{http_code} %{time_total}\\n' https://api.payflow.example/health`.",
+      "Step 3: Check whether the failures are isolated to PayFlow by comparing successful calls to other external dependencies and reviewing the payments-api error rate.",
+      "Step 4: If PayFlow is timing out, temporarily reduce or pause new PayFlow attempts using the application's configured gateway circuit breaker or feature flag rather than repeatedly retrying requests.",
+      "Step 5: Verify PayFlow status through the approved provider status endpoint or dashboard and record the incident window and returned HTTP status codes.",
+      "Step 6: Restore normal PayFlow traffic only after latency and error rates have returned to baseline, then monitor `payments-api` logs for at least 15 minutes."
     ]
   },
   {
@@ -102,16 +143,164 @@
     "title": "Managed Redis failover",
     "status": "active",
     "effective_from": "2026-06-10",
-    "replaced_by": null,
-    "supersedes": "RB-12",
-    "applies_to": ["redis", "checkout-service"],
+    "applies_to": ["Redis", "payments-api", "checkout-service"],
     "steps": [
-      "Step 1: Do NOT use sentinel commands. The managed service has no sentinels to command (that was RB-12).",
-      "Step 2: Open the managed Redis console and confirm which node is the current primary and the failover event time.",
-      "Step 3: If no automatic failover occurred, trigger one from the managed Redis control-plane (console or CLI).",
-      "Step 4: Roll checkout-service pods so clients re-resolve the managed endpoint DNS and drop the old primary address.",
-      "Step 5: Verify cart writes succeed and READONLY errors stop.",
-      "Step 6: Record the provider maintenance or failover reason in the incident."
+      "Step 1: Check managed Redis health with `cloudctl redis status nw-prod-eu-redis --region eu` and confirm the primary is unavailable or degraded.",
+      "Step 2: Inspect replication and replica health with `cloudctl redis replicas list nw-prod-eu-redis --region eu`.",
+      "Step 3: Initiate the provider-managed failover with `cloudctl redis failover nw-prod-eu-redis --region eu --confirm`.",
+      "Step 4: Wait for the service to report a healthy primary with `cloudctl redis status nw-prod-eu-redis --region eu --watch`.",
+      "Step 5: Verify application connectivity from Kubernetes with `kubectl -n nw-prod-eu-1 exec deploy/payments-api -- redis-cli -h $REDIS_HOST PING`.",
+      "Step 6: Monitor payments-api and checkout-service errors for 15 minutes and confirm cache operations return to normal."
+    ]
+  },
+  {
+    "id": "RB-33",
+    "title": "Cache stampede after a cache flush or mass expiry",
+    "status": "active",
+    "effective_from": "2026-08-01",
+    "applies_to": ["Redis", "payments-api", "checkout-service", "orders-api"],
+    "steps": [
+      "Step 1: Confirm cache misses and backend load increased together using application metrics and `kubectl -n nw-prod-eu-1 top pods`.",
+      "Step 2: Check Redis health and hit rate with `kubectl -n nw-prod-eu-1 exec deploy/payments-api -- redis-cli -h $REDIS_HOST INFO stats | grep -E 'keyspace_hits|keyspace_misses'`.",
+      "Step 3: Temporarily enable request coalescing, stale-cache serving, or the application's cache-stampede protection flag using the approved configuration system.",
+      "Step 4: Reduce non-critical background traffic with `kubectl -n nw-prod-eu-1 scale deployment/noncritical-cache-warmer --replicas=0` if that workload is amplifying database pressure.",
+      "Step 5: Monitor Postgres load and application latency with `kubectl -n nw-prod-eu-1 top pods` and the service dashboards; do not flush Redis again during recovery.",
+      "Step 6: Gradually restore normal traffic and verify cache hit rate and backend latency return toward their pre-incident baseline."
+    ]
+  },
+  {
+    "id": "RB-36",
+    "title": "TLS certificates via cert-manager",
+    "status": "active",
+    "effective_from": "2026-07-15",
+    "applies_to": ["cert-manager", "ingress-nginx"],
+    "steps": [
+      "Step 1: Inspect certificate status with `kubectl -n nw-prod-eu-1 get certificate -o wide` and identify certificates that are not Ready or are approaching expiration.",
+      "Step 2: Inspect the affected Certificate resource with `kubectl -n nw-prod-eu-1 describe certificate payments-tls` and check related CertificateRequest resources.",
+      "Step 3: Verify the cert-manager controller is healthy with `kubectl -n cert-manager get pods` and `kubectl -n cert-manager logs deployment/cert-manager --tail=200`.",
+      "Step 4: If the CertificateRequest is stuck and the configuration is known-good, trigger a renewal using `kubectl -n nw-prod-eu-1 annotate certificate payments-tls cert-manager.io/renew-reason=incident-$(date +%s) --overwrite`.",
+      "Step 5: Watch issuance with `kubectl -n nw-prod-eu-1 get certificate,pods,events --sort-by=.lastTimestamp` until the Certificate reports `Ready=True`.",
+      "Step 6: Verify ingress-nginx serves the renewed certificate with `openssl s_client -connect payments.northwind.example:443 -servername payments.northwind.example </dev/null 2>/dev/null | openssl x509 -noout -dates`."
+    ]
+  },
+  {
+    "id": "RB-40",
+    "title": "Autoscaler (HPA) misconfiguration",
+    "status": "active",
+    "effective_from": "2026-08-01",
+    "applies_to": ["payments-api", "checkout-service", "orders-api"],
+    "steps": [
+      "Step 1: Inspect HPA state with `kubectl -n nw-prod-eu-1 get hpa` and `kubectl -n nw-prod-eu-1 describe hpa payments-api`.",
+      "Step 2: Confirm the target deployment and resource requests with `kubectl -n nw-prod-eu-1 get deployment payments-api -o yaml`.",
+      "Step 3: Check whether metrics are available with `kubectl -n nw-prod-eu-1 top pods` and inspect the metrics API using `kubectl get --raw /apis/metrics.k8s.io/v1beta1/nodes`.",
+      "Step 4: Correct an invalid HPA target or min/max replica setting with `kubectl -n nw-prod-eu-1 edit hpa payments-api`, keeping minReplicas below or equal to maxReplicas.",
+      "Step 5: Watch scaling behavior with `kubectl -n nw-prod-eu-1 get hpa,pods --watch` and confirm replicas track load without exceeding the configured bounds.",
+      "Step 6: Review application CPU and memory requests so HPA utilization calculations are based on realistic resource requests."
+    ]
+  },
+  {
+    "id": "RB-41",
+    "title": "Object storage permission errors",
+    "status": "active",
+    "effective_from": "2026-08-01",
+    "applies_to": ["payments-api", "orders-api", "notification-service"],
+    "steps": [
+      "Step 1: Capture the exact storage error from logs with `kubectl -n nw-prod-eu-1 logs deployment/orders-api --since=15m | grep -Ei '403|AccessDenied|permission'`.",
+      "Step 2: Confirm the workload identity or service account with `kubectl -n nw-prod-eu-1 get deployment/orders-api -o jsonpath='{.spec.template.spec.serviceAccountName}'`.",
+      "Step 3: Inspect the configured bucket with `kubectl -n nw-prod-eu-1 exec deploy/orders-api -- printenv | grep -E 'BUCKET|OBJECT_STORAGE'`.",
+      "Step 4: Test access using the cloud CLI and workload identity, for example `cloudctl storage bucket get nw-prod-artifacts --identity orders-api`.",
+      "Step 5: Compare the identity's policy with the required object operations and grant only the missing permission using `cloudctl iam policy add-binding --identity orders-api --role object-reader --resource nw-prod-artifacts`.",
+      "Step 6: Retry the application operation and confirm the permission error disappears without granting broad administrative access."
+    ]
+  },
+  {
+    "id": "RB-42",
+    "title": "CI/CD pipeline stuck or failing deploys",
+    "status": "active",
+    "effective_from": "2026-08-01",
+    "applies_to": ["CI/CD", "nw-prod-eu-1"],
+    "steps": [
+      "Step 1: Inspect the latest pipeline status with `cictl pipeline list --project northwind-payments --limit 10` and identify the first failed or stuck stage.",
+      "Step 2: Retrieve logs with `cictl pipeline logs <pipeline-id> --failed-step` and determine whether the failure is source, build, registry, credentials, or Kubernetes related.",
+      "Step 3: If the deployment job is stuck, check Kubernetes rollout state with `kubectl -n nw-prod-eu-1 get deployments,pods` and identify any incomplete rollout.",
+      "Step 4: Validate the deployment manifest before retrying with `kubectl -n nw-prod-eu-1 apply --dry-run=server -f deploy/production.yaml`.",
+      "Step 5: Retry only the failed pipeline stage with `cictl pipeline retry <pipeline-id> --stage <stage-name>` after correcting the identified cause.",
+      "Step 6: Confirm the resulting Kubernetes rollout with `kubectl -n nw-prod-eu-1 rollout status deployment/payments-api --timeout=300s` and record the successful pipeline ID."
+    ]
+  },
+  {
+    "id": "RB-43",
+    "title": "Load balancer health-check failures",
+    "status": "active",
+    "effective_from": "2026-08-01",
+    "applies_to": ["ingress-nginx", "payments-api", "checkout-service"],
+    "steps": [
+      "Step 1: Inspect ingress and service endpoints with `kubectl -n nw-prod-eu-1 get ingress,svc,endpoints`.",
+      "Step 2: Check ingress-nginx controller health with `kubectl -n nw-prod-eu-1 get pods -l app.kubernetes.io/component=controller` and inspect logs using `kubectl -n nw-prod-eu-1 logs deployment/ingress-nginx-controller --tail=200`.",
+      "Step 3: Verify the health-check path from inside the cluster with `kubectl -n nw-prod-eu-1 run curl-test --rm -it --image=curlimages/curl -- curl -i http://payments-api/health`.",
+      "Step 4: Confirm the Kubernetes Service targetPort matches the application's listening port using `kubectl -n nw-prod-eu-1 get svc payments-api -o yaml`.",
+      "Step 5: Correct a bad readiness or health-check path in the ingress/service configuration and apply it with `kubectl -n nw-prod-eu-1 apply -f ingress.yaml`.",
+      "Step 6: Verify the external load balancer reports healthy backends with `cloudctl lb backends list nw-prod-payments-lb` and confirm successful external requests."
+    ]
+  },
+  {
+    "id": "RB-44",
+    "title": "Secrets rotation failure",
+    "status": "active",
+    "effective_from": "2026-08-01",
+    "applies_to": ["payments-api", "auth-service", "checkout-service"],
+    "steps": [
+      "Step 1: Identify authentication failures after rotation with `kubectl -n nw-prod-eu-1 logs deployment/auth-service --since=15m | grep -Ei 'secret|credential|401|403|authentication'`.",
+      "Step 2: Verify the Kubernetes Secret metadata and recent update time with `kubectl -n nw-prod-eu-1 get secret payments-api-credentials -o yaml` without printing secret values.",
+      "Step 3: Confirm the external secret source contains the intended current version using `cloudctl secrets versions list payments-api-credentials`.",
+      "Step 4: If the Kubernetes Secret was not updated, synchronize the approved version with `cloudctl secrets sync payments-api-credentials --namespace nw-prod-eu-1 --secret payments-api-credentials`.",
+      "Step 5: Restart workloads that read secrets only at startup with `kubectl -n nw-prod-eu-1 rollout restart deployment/payments-api deployment/auth-service`.",
+      "Step 6: Verify authentication and database connections recover while ensuring secret values are not written to logs or incident tickets."
+    ]
+  },
+  {
+    "id": "RB-45",
+    "title": "Clock skew / NTP drift",
+    "status": "active",
+    "effective_from": "2026-08-01",
+    "applies_to": ["nw-prod-eu-1", "auth-service", "payments-api"],
+    "steps": [
+      "Step 1: Identify affected nodes with `kubectl get nodes -o wide` and inspect node events using `kubectl describe node <node-name>`.",
+      "Step 2: Check time synchronization on the node with `ssh <node-name> 'timedatectl status; chronyc tracking'`.",
+      "Step 3: Compare time against the approved NTP source with `ssh <node-name> 'chronyc sources -v'` and record the observed offset.",
+      "Step 4: Restart the time synchronization service with `ssh <node-name> 'sudo systemctl restart chronyd'` and verify with `ssh <node-name> 'chronyc tracking'`.",
+      "Step 5: If the node remains significantly skewed, cordon and drain it with `kubectl cordon <node-name>` followed by `kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data --timeout=10m`.",
+      "Step 6: Confirm application authentication and timestamp-sensitive operations recover after the node clock is synchronized."
+    ]
+  },
+  {
+    "id": "RB-46",
+    "title": "Slow query caused by a missing index",
+    "status": "active",
+    "effective_from": "2026-08-01",
+    "applies_to": ["postgres-primary-0", "orders-api", "payments-api"],
+    "steps": [
+      "Step 1: Identify the slow query from application metrics or Postgres statistics with `kubectl -n nw-prod-eu-1 exec postgres-primary-0 -- psql -U postgres -c \"SELECT query, calls, mean_exec_time FROM pg_stat_statements ORDER BY mean_exec_time DESC LIMIT 10;\"`.",
+      "Step 2: Inspect the query plan with `kubectl -n nw-prod-eu-1 exec postgres-primary-0 -- psql -U postgres -c \"EXPLAIN (ANALYZE, BUFFERS) SELECT ...;\"` and confirm a sequential scan is responsible for the latency.",
+      "Step 3: Check existing indexes with `kubectl -n nw-prod-eu-1 exec postgres-primary-0 -- psql -U postgres -c '\\di'` before creating a duplicate index.",
+      "Step 4: Create the required index using `CREATE INDEX CONCURRENTLY` through `psql` so normal reads and writes can continue during index creation.",
+      "Step 5: Re-run the query plan and verify the new index is selected with `EXPLAIN (ANALYZE, BUFFERS) SELECT ...;`.",
+      "Step 6: Monitor database latency and application response time for at least 15 minutes and document the index change for the schema migration process."
+    ]
+  },
+  {
+    "id": "RB-47",
+    "title": "Traffic spike / bot traffic (WAF rules)",
+    "status": "active",
+    "effective_from": "2026-08-01",
+    "applies_to": ["ingress-nginx", "payments-api", "checkout-service", "orders-api"],
+    "steps": [
+      "Step 1: Confirm the traffic spike from ingress metrics and logs with `kubectl -n nw-prod-eu-1 logs deployment/ingress-nginx-controller --since=10m | awk '{print $7}' | sort | uniq -c | sort -nr | head`.",
+      "Step 2: Identify suspicious source IPs, paths, user agents, and request rates without blocking legitimate payment traffic.",
+      "Step 3: Add a narrowly scoped WAF rate-limit or bot rule through the approved WAF configuration using `cloudctl waf rules create nw-prod-payments --match '<documented-condition>' --action rate-limit`.",
+      "Step 4: Validate the rule in monitoring or dry-run mode when supported, then confirm legitimate checkout and payment requests remain successful.",
+      "Step 5: Monitor ingress latency, 4xx/5xx rates, CPU usage, and request volume with `kubectl -n nw-prod-eu-1 top pods` and the load balancer dashboard.",
+      "Step 6: Remove or relax the temporary rule once traffic returns to normal with `cloudctl waf rules delete nw-prod-payments --rule-id <temporary-rule-id>` and record the final traffic pattern."
     ]
   }
 ]

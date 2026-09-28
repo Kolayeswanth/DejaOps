@@ -1,0 +1,368 @@
+[
+  {
+    "id": "INC-031",
+    "date": "2026-03-11T01:22:00Z",
+    "service": "payments-api",
+    "severity": "SEV2",
+    "alert": "Postgres pool wait queue saturated; payment requests timing out",
+    "logs": "2026-03-11T01:22:03Z payments-api-6c8d7f5b9-b4nrx ERROR db.pool - timeout acquiring connection after 30000ms\n2026-03-11T01:22:08Z pgbouncer-7f6c89c6d8-k7qmt LOG pool=payments cl_active=191 cl_waiting=89 sv_active=64\n2026-03-11T01:22:14Z payments-api-6c8d7f5b9-b4nrx ERROR psycopg2.pool.PoolError: connection acquisition timed out\n2026-03-11T01:22:20Z orders-api-7b5f9c8d6-v3mqp ERROR pq: remaining connection slots are reserved for non-replication superuser connections\n2026-03-11T01:22:31Z checkout-service-5b77d8c4f9-r8tkn WARN POST /checkout status=503 reason=database_pool_timeout",
+    "root_cause": "The nightly batch workload consumed the available pgbouncer capacity and left insufficient pooled connections for interactive services.",
+    "actions": [
+      {
+        "step": "Scale the payments-api deployment to add more application replicas.",
+        "result": "failed"
+      },
+      {
+        "step": "Raise PostgreSQL max_connections to increase database capacity.",
+        "result": "failed"
+      },
+      {
+        "step": "Pause the nightly batch job and restart pgbouncer to clear the exhausted pool.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 45,
+    "runbook": "RB-07",
+    "postmortem": "The overnight batch consumed the shared connection pool and caused interactive requests to wait until their deadlines expired. Application scaling was ineffective because it increased database demand; pausing the batch and restarting pgbouncer restored service."
+  },
+  {
+    "id": "INC-032",
+    "date": "2026-03-14T05:17:00Z",
+    "service": "Redis",
+    "severity": "SEV1",
+    "alert": "Self-hosted Redis primary failed; cache writes returning connection and read-only errors",
+    "logs": "2026-03-14T05:17:02Z payments-api-6c8d7f5b9-m7qks ERROR redis.client - ConnectionError: Error 111 connecting to redis-primary:6379. Connection refused.\n2026-03-14T05:17:07Z checkout-service-5b77d8c4f9-h3vnr ERROR redis.exceptions.ReadOnlyError: You can't write against a read only replica.\n2026-03-14T05:17:14Z redis-primary-0 redis-server[1922] ERROR Unexpected shutdown while loading append-only file\n2026-03-14T05:17:21Z redis-sentinel-0 sentinel WARN +sdown master nw-cache 10.24.8.11 6379\n2026-03-14T05:17:33Z redis-replica-0 redis-server[1814] NOTICE Ready to accept connections\n2026-03-14T05:18:02Z payments-api-6c8d7f5b9-m7qks WARN cache fallback active=true",
+    "root_cause": "The self-hosted Redis primary became unavailable during persistence recovery while a healthy replica remained available for promotion.",
+    "actions": [
+      {
+        "step": "Restart the Sentinel process and wait for automatic recovery.",
+        "result": "failed"
+      },
+      {
+        "step": "Promote the healthy replica manually to become the new primary.",
+        "result": "worked"
+      },
+      {
+        "step": "Update the service endpoint to the promoted primary and restart affected applications.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 37,
+    "runbook": "RB-12",
+    "postmortem": "The self-hosted primary failed during persistence recovery and clients began seeing read-only behavior from a replica. Manual promotion and endpoint correction restored normal cache writes."
+  },
+  {
+    "id": "INC-033",
+    "date": "2026-03-17T11:04:00Z",
+    "service": "orders-api",
+    "severity": "SEV2",
+    "alert": "Orders API pods repeatedly OOMKilled following application release",
+    "logs": "2026-03-17T11:04:03Z orders-api-7b5f9c8d6-p6mrt kubelet WARNING Container orders-api was OOMKilled\n2026-03-17T11:04:09Z orders-api-7b5f9c8d6-p6mrt ERROR runtime: out of memory: Killed process 22 (java)\n2026-03-17T11:04:17Z orders-api-7b5f9c8d6-v9qkn INFO release=orders-20260317.2 revision=57\n2026-03-17T11:04:28Z orders-api-7b5f9c8d6-v9qkn WARN readiness probe failed: HTTP probe returned statuscode: 503\n2026-03-17T11:04:42Z orders-api-7b5f9c8d6-p6mrt kubelet INFO Back-off restarting failed container\n2026-03-17T11:05:06Z orders-api-7b5f9c8d6-v9qkn ERROR container terminated with exit code 137",
+    "root_cause": "A new orders-api release introduced a memory leak that caused containers to exceed their configured memory limit under normal production traffic.",
+    "actions": [
+      {
+        "step": "Restart the affected orders-api pods and monitor their memory usage.",
+        "result": "failed"
+      },
+      {
+        "step": "Increase the orders-api container memory limit without changing the deployed image.",
+        "result": "failed"
+      },
+      {
+        "step": "Roll back orders-api to the previously healthy deployment revision.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 61,
+    "runbook": "RB-03",
+    "postmortem": "The new orders-api image steadily consumed memory until Kubernetes terminated its containers. Restarts and a larger limit did not remove the leak, while rollback returned the service to the stable release."
+  },
+  {
+    "id": "INC-034",
+    "date": "2026-03-20T16:38:00Z",
+    "service": "ingress-nginx",
+    "severity": "SEV2",
+    "alert": "Expired payments TLS certificate causing public HTTPS failures",
+    "logs": "2026-03-20T16:38:02Z ingress-nginx-controller-6b9f8f7d5c-q8mnr ERROR SSL_do_handshake() failed (SSL: error:0A000086:SSL routines::certificate verify failed)\n2026-03-20T16:38:08Z ingress-nginx-controller-6b9f8f7d5c-q8mnr ERROR certificate has expired: notAfter=2026-03-20T16:29:59Z\n2026-03-20T16:38:15Z cloud-lb-healthcheck[7148] WARN TLS probe failed host=payments.northwind.example\n2026-03-20T16:38:22Z payments-api-6c8d7f5b9-k4vpt INFO requests_rejected_tls=42\n2026-03-20T16:38:37Z ingress-nginx-controller-6b9f8f7d5c-q8mnr WARN no valid certificate for server_name=payments.northwind.example",
+    "root_cause": "The public payments certificate expired before the manual certificate renewal had been completed.",
+    "actions": [
+      {
+        "step": "Restart ingress-nginx so the controller reloads its currently configured certificate.",
+        "result": "failed"
+      },
+      {
+        "step": "Manually obtain a replacement certificate, update the TLS secret, and verify the served certificate.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 41,
+    "runbook": "RB-15",
+    "postmortem": "The production certificate expired and ingress could no longer complete TLS handshakes. Restarting the controller did not change the expired credential; manual renewal restored external HTTPS traffic."
+  },
+  {
+    "id": "INC-035",
+    "date": "2026-03-23T03:16:00Z",
+    "service": "postgres-primary-0",
+    "severity": "SEV2",
+    "alert": "Postgres storage critically full due to retained WAL",
+    "logs": "2026-03-23T03:16:03Z postgres-primary-0 postgres[2241] WARNING disk usage on /var/lib/postgresql/data reached 97%\n2026-03-23T03:16:10Z postgres-primary-0 postgres[2241] ERROR could not write to file \"pg_wal/xlogtemp.2241\": No space left on device\n2026-03-23T03:16:18Z postgres-primary-0 postgres[2241] LOG inactive replication slot analytics_archive_slot retaining 196 GB\n2026-03-23T03:16:26Z payments-api-6c8d7f5b9-r2mkv ERROR pq: could not extend file: No space left on device\n2026-03-23T03:16:41Z postgres-primary-0 postgres[2241] WARNING checkpoints are occurring too frequently due to disk pressure",
+    "root_cause": "An abandoned inactive replication slot prevented PostgreSQL from recycling WAL and consumed nearly all available data-volume space.",
+    "actions": [
+      {
+        "step": "Remove old PostgreSQL and application log files from the data volume.",
+        "result": "failed"
+      },
+      {
+        "step": "Drop the confirmed abandoned replication slot retaining excessive WAL.",
+        "result": "worked"
+      },
+      {
+        "step": "Expand the PostgreSQL PVC to add recovery headroom.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 76,
+    "runbook": "RB-22",
+    "postmortem": "WAL retention from an obsolete replication slot filled the primary database volume and began blocking writes. Removing the slot released the retained WAL, while additional PVC capacity provided protection during recovery."
+  },
+  {
+    "id": "INC-036",
+    "date": "2026-03-26T08:52:00Z",
+    "service": "CoreDNS",
+    "severity": "SEV3",
+    "alert": "CoreDNS SERVFAIL responses causing intermittent cluster service discovery failures",
+    "logs": "2026-03-26T08:52:03Z payments-api-6c8d7f5b9-t5qnr ERROR dial tcp: lookup checkout-service on 10.96.0.10:53: server misbehaving\n2026-03-26T08:52:09Z coredns-7db6d8ff4d-m3kps ERROR plugin/forward: no nameservers found for upstream\n2026-03-26T08:52:16Z coredns-7db6d8ff4d-v8nqt ERROR plugin/errors: 2 api.payflow.example. A: SERVFAIL\n2026-03-26T08:52:24Z auth-service-7d9c6f8b5-r4mkn WARN dependency lookup failed hostname=postgres-primary-0\n2026-03-26T08:52:38Z coredns-7db6d8ff4d-m3kps INFO reload requested config_revision=217",
+    "root_cause": "The CoreDNS Corefile contained an invalid forward configuration, leaving the DNS forward plugin without usable upstream servers.",
+    "actions": [
+      {
+        "step": "Scale the CoreDNS deployment to six replicas.",
+        "result": "failed"
+      },
+      {
+        "step": "Fix the forward configuration in the Corefile and reload CoreDNS.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 28,
+    "runbook": "RB-18",
+    "postmortem": "All CoreDNS replicas inherited the same malformed forwarding configuration, so increasing replica count did not restore resolution. Correcting the Corefile brought internal and external lookups back to normal."
+  },
+  {
+    "id": "INC-037",
+    "date": "2026-03-29T12:43:00Z",
+    "service": "payments-api",
+    "severity": "SEV2",
+    "alert": "PayFlow charge requests timing out above configured client deadline",
+    "logs": "2026-03-29T12:43:02Z payments-api-6c8d7f5b9-n8qmr ERROR PayFlowClient - POST /v2/charges: context deadline exceeded\n2026-03-29T12:43:08Z payments-api-6c8d7f5b9-n8qmr WARN gateway=PayFlow elapsed_ms=5038 attempt=1\n2026-03-29T12:43:14Z payments-api-6c8d7f5b9-f3kpt ERROR upstream timeout while waiting for response headers\n2026-03-29T12:43:23Z payments-api-6c8d7f5b9-f3kpt WARN payment_failure_rate=14.9 percent dependency=PayFlow\n2026-03-29T12:43:35Z payments-api-6c8d7f5b9-n8qmr ERROR charge request aborted request_id=ch_5b19c2",
+    "root_cause": "PayFlow response latency increased beyond the payments-api client deadline, producing repeated upstream timeouts.",
+    "actions": [
+      {
+        "step": "Increase the PayFlow client timeout from five seconds to fifteen seconds.",
+        "result": "failed"
+      },
+      {
+        "step": "Enable exponential backoff retries together with the circuit breaker.",
+        "result": "worked"
+      },
+      {
+        "step": "Fail over payment traffic to the secondary gateway.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 63,
+    "runbook": "RB-26",
+    "postmortem": "PayFlow latency exceeded the application deadline and caused a sharp increase in failed charges. Backoff with circuit protection reduced repeated attempts, and secondary gateway routing provided a stable path for payment traffic."
+  },
+  {
+    "id": "INC-038",
+    "date": "2026-04-01T18:07:00Z",
+    "service": "checkout-service",
+    "severity": "SEV3",
+    "alert": "Checkout failures elevated after feature-flag rollout",
+    "logs": "2026-04-01T18:07:03Z checkout-service-5b77d8c4f9-w6mqp ERROR checkout.flow - IllegalStateException: payment_session missing\n2026-04-01T18:07:09Z checkout-service-5b77d8c4f9-w6mqp WARN feature_flag fast_checkout_v3 enabled=true\n2026-04-01T18:07:16Z checkout-service-5b77d8c4f9-j4rkn ERROR POST /checkout status=500 request_id=co_71d2f4\n2026-04-01T18:07:25Z checkout-service-5b77d8c4f9-j4rkn INFO config_revision=checkout-flags-20260401.6\n2026-04-01T18:07:42Z checkout-service-5b77d8c4f9-w6mqp WARN five_minute_error_rate=11.4%",
+    "root_cause": "A newly enabled checkout feature flag activated a production-incompatible execution path that expected unavailable payment session data.",
+    "actions": [
+      {
+        "step": "Restart the checkout-service deployment to clear application state.",
+        "result": "failed"
+      },
+      {
+        "step": "Revert fast_checkout_v3 to its previous known-good feature-flag value.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 23,
+    "runbook": "RB-09",
+    "postmortem": "The checkout error spike began directly after a new feature flag was enabled. Restarting the service left the problematic flag active, while reverting it restored normal checkout behavior."
+  },
+  {
+    "id": "INC-039",
+    "date": "2026-04-04T06:28:00Z",
+    "service": "nw-prod-eu-1",
+    "severity": "SEV2",
+    "alert": "Kubernetes worker NotReady with affected application workloads",
+    "logs": "2026-04-04T06:28:02Z kube-controller-manager-7c8d9f6b4d-p5rmt WARNING Node worker-eu-1 condition Ready changed to Unknown\n2026-04-04T06:28:09Z kubelet-worker-eu-1 ERROR failed to renew lease: context deadline exceeded\n2026-04-04T06:28:17Z payments-api-6c8d7f5b9-x2qnr kubelet WARNING Liveness probe failed: HTTP probe returned statuscode: 500\n2026-04-04T06:28:26Z checkout-service-5b77d8c4f9-v7mks kubelet ERROR failed to update pod status: node is not ready\n2026-04-04T06:28:43Z kube-scheduler-6f8d7b5c4d-m8qpt WARN insufficient healthy nodes for immediate placement",
+    "root_cause": "Worker-eu-1 stopped maintaining its Kubernetes node lease and remained unhealthy despite application pods still being scheduled there.",
+    "actions": [
+      {
+        "step": "Reboot worker-eu-1 and wait for the kubelet to reconnect.",
+        "result": "failed"
+      },
+      {
+        "step": "Cordon and drain worker-eu-1, then replace the unhealthy node.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 72,
+    "runbook": "RB-14",
+    "postmortem": "The worker remained NotReady because its kubelet could not maintain a healthy lease with the control plane. Rebooting did not provide a stable recovery, so the node was drained and replaced."
+  },
+  {
+    "id": "INC-040",
+    "date": "2026-04-07T10:15:00Z",
+    "service": "orders-api",
+    "severity": "SEV3",
+    "alert": "Cache tier miss ratio spiking and database read load elevated",
+    "logs": "2026-04-07T10:15:03Z orders-api-7b5f9c8d6-q9mrt WARN cache_miss_ratio=93.1 percent endpoint=/orders/history\n2026-04-07T10:15:10Z orders-api-7b5f9c8d6-q9mrt WARN postgres_read_qps=16240 baseline=2800\n2026-04-07T10:15:18Z payments-api-6c8d7f5b9-f5kpn ERROR database latency p95_ms=1897\n2026-04-07T10:15:27Z checkout-service-5b77d8c4f9-c8vmt WARN request_queue_depth=421\n2026-04-07T10:15:41Z orders-api-7b5f9c8d6-q9mrt INFO cache_stampede_guard=disabled",
+    "root_cause": "A large group of frequently accessed cache entries expired together, causing simultaneous backend regeneration requests.",
+    "actions": [
+      {
+        "step": "Increase the cache tier capacity to absorb the elevated miss rate.",
+        "result": "failed"
+      },
+      {
+        "step": "Add read replicas to distribute the additional database workload.",
+        "result": "failed"
+      },
+      {
+        "step": "Apply TTL jitter and request coalescing to prevent duplicate cache rebuilds.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 46,
+    "runbook": "RB-33",
+    "postmortem": "A synchronized cache expiry generated a large volume of duplicate backend requests and overloaded database reads. Increasing capacity did not reduce duplicate work, while jittered expiration and request coalescing stabilized the traffic pattern."
+  },
+  {
+    "id": "INC-041",
+    "date": "2026-04-09T13:51:00Z",
+    "service": "orders-api",
+    "severity": "SEV3",
+    "alert": "Orders API unable to read production object artifacts",
+    "logs": "2026-04-09T13:51:02Z orders-api-7b5f9c8d6-m7qpr ERROR storage.GetObject - AccessDenied: 403 Forbidden\n2026-04-09T13:51:08Z orders-api-7b5f9c8d6-m7qpr WARN bucket=nw-prod-artifacts operation=get_object object=orders/export/20260409.json\n2026-04-09T13:51:15Z orders-api-7b5f9c8d6-m7qpr ERROR fulfillment export failed request_id=exp_94ac21\n2026-04-09T13:51:22Z orders-api-7b5f9c8d6-m7qpr INFO serviceAccount=orders-api\n2026-04-09T13:51:37Z orders-api-7b5f9c8d6-m7qpr WARN retry budget exhausted for object retrieval",
+    "root_cause": "The orders-api workload identity no longer had the object-reader permission required by the production artifact bucket.",
+    "actions": [
+      {
+        "step": "Capture the exact 403 response and identify the service identity used by orders-api.",
+        "result": "worked"
+      },
+      {
+        "step": "Restore the missing object-reader permission on that workload identity.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 21,
+    "runbook": "RB-41",
+    "postmortem": "A policy change removed a required object-storage permission from the orders-api identity. Restoring the narrowly scoped reader permission allowed artifact retrieval without granting administrative access."
+  },
+  {
+    "id": "INC-042",
+    "date": "2026-04-10T21:07:00Z",
+    "service": "payments-api",
+    "severity": "SEV3",
+    "alert": "HPA reporting invalid replica bounds and refusing scale-out",
+    "logs": "2026-04-10T21:07:03Z horizontal-pod-autoscaler ERROR payments-api: failed to calculate desired replicas\n2026-04-10T21:07:09Z horizontal-pod-autoscaler WARN minReplicas=10 maxReplicas=6\n2026-04-10T21:07:16Z payments-api-6c8d7f5b9-p4nmt INFO cpu_usage_percent=88 request_rate=731\n2026-04-10T21:07:24Z horizontal-pod-autoscaler ERROR invalid autoscaler configuration: minReplicas must not exceed maxReplicas\n2026-04-10T21:07:39Z payments-api-6c8d7f5b9-p4nmt WARN latency_p95_ms=1427",
+    "root_cause": "The payments-api HPA had contradictory minimum and maximum replica settings, preventing the controller from calculating a valid desired replica count.",
+    "actions": [
+      {
+        "step": "Inspect the HPA definition and confirm the invalid replica bounds.",
+        "result": "worked"
+      },
+      {
+        "step": "Set a valid minReplicas/maxReplicas range and monitor the autoscaler.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 18,
+    "runbook": "RB-40",
+    "postmortem": "An autoscaler configuration update left the minimum replica count above the maximum. Correcting the bounds allowed the HPA controller to resume normal scaling."
+  },
+  {
+    "id": "INC-043",
+    "date": "2026-04-11T04:34:00Z",
+    "service": "payments-api",
+    "severity": "SEV2",
+    "alert": "Payment pool exhaustion causing elevated database wait time",
+    "logs": "2026-04-11T04:34:03Z payments-api-6c8d7f5b9-q6mnr ERROR database/sql: context deadline exceeded while waiting for a connection\n2026-04-11T04:34:09Z pgbouncer-7f6c89c6d8-v2kpt LOG pool=payments cl_active=190 cl_waiting=94\n2026-04-11T04:34:16Z pgbouncer-7f6c89c6d8-v2kpt WARN server_connections=64 max_server_connections=64\n2026-04-11T04:34:23Z checkout-service-5b77d8c4f9-j9rms ERROR org.postgresql.util.PSQLException: FATAL: remaining connection slots are reserved\n2026-04-11T04:34:38Z payments-api-6c8d7f5b9-q6mnr WARN POST /payments status=503 elapsed_ms=30007",
+    "root_cause": "The scheduled nightly batch consumed the shared pgbouncer server pool and prevented application requests from obtaining database connections.",
+    "actions": [
+      {
+        "step": "Scale the payment application pods to handle the request backlog.",
+        "result": "failed"
+      },
+      {
+        "step": "Attempt to raise PostgreSQL max_connections during the active batch.",
+        "result": "failed"
+      },
+      {
+        "step": "Pause the nightly batch and restart pgbouncer to restore pooled connection availability.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 51,
+    "runbook": "RB-07",
+    "postmortem": "The batch workload exhausted pgbouncer capacity and left normal payment traffic waiting for connections. Adding application capacity did not help; pausing the batch and restarting pgbouncer cleared the saturation."
+  },
+  {
+    "id": "INC-044",
+    "date": "2026-04-11T15:19:00Z",
+    "service": "payments-api",
+    "severity": "SEV2",
+    "alert": "Abnormal inbound traffic surge increasing ingress request rate",
+    "logs": "2026-04-11T15:19:02Z ingress-nginx-controller-6b9f8f7d5c-r8mpt WARN request_rate=18420rps baseline=2100rps\n2026-04-11T15:19:08Z ingress-nginx-controller-6b9f8f7d5c-r8mpt INFO top_path=/v1/payments method=POST source_count=37\n2026-04-11T15:19:15Z payments-api-6c8d7f5b9-k3qnr WARN cpu_usage_percent=94 replicas=8\n2026-04-11T15:19:23Z cloud-lb[5217] WARN upstream_5xx_rate=7.8 percent request_volume=18102rps\n2026-04-11T15:19:36Z ingress-nginx-controller-6b9f8f7d5c-r8mpt ERROR upstream timed out while connecting to payments-api",
+    "root_cause": "A sudden burst of automated traffic targeted payment endpoints and consumed ingress and application capacity.",
+    "actions": [
+      {
+        "step": "Confirm the traffic pattern and identify the highest-volume source addresses and request paths.",
+        "result": "worked"
+      },
+      {
+        "step": "Apply a narrowly scoped WAF rate-limit rule to the identified abusive request pattern.",
+        "result": "worked"
+      },
+      {
+        "step": "Monitor legitimate payment traffic and remove the temporary restriction after request volume normalized.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 47,
+    "runbook": "RB-47",
+    "postmortem": "Automated traffic caused a several-fold increase in payment endpoint requests and pushed application capacity beyond normal levels. A narrowly scoped WAF rate limit reduced the abusive volume while preserving legitimate payment requests."
+  },
+  {
+    "id": "INC-045",
+    "date": "2026-04-12T19:42:00Z",
+    "service": "payments-api",
+    "severity": "SEV2",
+    "alert": "Payment database connections exhausted during scheduled batch activity",
+    "logs": "2026-04-12T19:42:03Z payments-api-6c8d7f5b9-f7mkr ERROR pq: connection pool exhausted; timeout waiting for idle connection\n2026-04-12T19:42:09Z pgbouncer-7f6c89c6d8-m4qpt LOG pool=payments cl_active=194 cl_waiting=101 sv_active=64\n2026-04-12T19:42:17Z payments-api-6c8d7f5b9-f7mkr WARN request_id=pay_84e1a2 database_acquire_ms=30000\n2026-04-12T19:42:25Z orders-api-7b5f9c8d6-z8nmr ERROR pq: sorry, too many clients already\n2026-04-12T19:42:39Z pgbouncer-7f6c89c6d8-m4qpt WARN max client wait queue reached for pool=payments",
+    "root_cause": "The nightly batch job consumed the pgbouncer pool and left application workloads without enough database connections.",
+    "actions": [
+      {
+        "step": "Add additional payments-api replicas to absorb the growing request queue.",
+        "result": "failed"
+      },
+      {
+        "step": "Increase max_connections in PostgreSQL while leaving the batch workload active.",
+        "result": "failed"
+      },
+      {
+        "step": "Restart pgbouncer and temporarily halt the nightly batch processing.",
+        "result": "worked"
+      }
+    ],
+    "resolution_minutes": 49,
+    "runbook": "RB-07",
+    "postmortem": "The scheduled batch exhausted the shared connection pool and caused database acquisition timeouts across application services. Scaling pods and increasing connection demand could not resolve the bottleneck; pausing the batch and restarting pgbouncer recovered the pool."
+  }
+]

@@ -3,7 +3,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from hindsight_client import Hindsight
 
-load_dotenv()
+load_dotenv(override=True)  # .env wins over a stale shell variable
 BANK_ID = os.getenv("DEJAOPS_BANK", "dev-test")
 client = Hindsight(base_url=os.environ["HINDSIGHT_URL"],
                    api_key=os.environ["HINDSIGHT_API_KEY"], timeout=90.0)
@@ -72,3 +72,9 @@ def learned_summary():
                "IDs from memory. If the bank has little or no relevant information, reply exactly: "
                "Not enough memory yet. Never invent IDs, dates or runbooks."))
     return ans.text
+
+def retain_postmortem(text):
+    now = datetime.now()
+    client.retain(bank_id=BANK_ID,
+                  content=f"Postmortem added by an engineer on {now.isoformat(timespec='minutes')}: {text}",
+                  context="postmortem", timestamp=now, retain_async=False)
