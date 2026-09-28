@@ -1,6 +1,4 @@
-fastapi
-uvicorn
+streamlit
+groq
 python-dotenv
-pydantic
-openai
 hindsight-client

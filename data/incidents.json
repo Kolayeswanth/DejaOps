@@ -1,38 +1,22 @@
-[
-  {
-    "id": "INC-1001",
-    "title": "Payments API latency spike",
-    "service": "payments-api",
-    "severity": "SEV-2",
-    "occurred_at": "2026-08-12T14:22:00Z",
-    "symptoms": "p99 latency jumped from 180ms to 4.2s. Checkout timeouts increased 18%. Postgres showed 'too many connections'.",
-    "root_cause": "Connection pool max_overflow was 0 after a config rollout. Idle connections were held by a leaked SQLAlchemy session in the refunds worker.",
-    "resolution": "Rolled back pool settings, recycled leaked sessions, raised pool_size to 20 and max_overflow to 10, then restarted the refunds worker.",
-    "runbook_id": "RB-DB-001",
-    "tags": ["postgres", "connection-pool", "payments"]
-  },
-  {
-    "id": "INC-1002",
-    "title": "Redis cache stampede on product catalog",
-    "service": "catalog-api",
-    "severity": "SEV-2",
-    "occurred_at": "2026-07-03T09:05:00Z",
-    "symptoms": "Catalog 5xx burst after cache TTL expiry. Redis CPU at 95%. Origin Postgres query rate 20x normal.",
-    "root_cause": "All product keys shared the same TTL. A deploy cleared the cache with no request coalescing.",
-    "resolution": "Enabled singleflight on cache miss, staggered TTLs, and warmed top 5k SKUs before traffic was restored.",
-    "runbook_id": "RB-CACHE-001",
-    "tags": ["redis", "cache-stampede", "catalog"]
-  },
-  {
-    "id": "INC-1003",
-    "title": "Kubernetes CrashLoopBackOff on ingest workers",
-    "service": "ingest-worker",
-    "severity": "SEV-1",
-    "occurred_at": "2026-06-18T02:41:00Z",
-    "symptoms": "ingest-worker pods restarting every 40s. Kafka lag grew to 12 million messages. OOMKilled in events.",
-    "root_cause": "Batch size was increased to 5k without raising memory limits. A poison JSON payload also allocated a huge object graph.",
-    "resolution": "Reverted batch size to 500, raised memory limit to 1Gi, quarantined the poison offset, and added a payload size guard.",
-    "runbook_id": "RB-K8S-001",
-    "tags": ["kubernetes", "oom", "kafka"]
-  }
-]
+{
+  "id": "INC-014",
+  "date": "2026-03-04T02:14:00Z",
+  "service": "payments-api",
+  "severity": "SEV2",
+  "alert": "...",
+  "logs": "...",
+  "root_cause": "...",
+  "actions": [
+    {
+      "step": "Scaled payments-api 4→12 pods",
+      "result": "failed"
+    },
+    {
+      "step": "Restarted pgbouncer",
+      "result": "worked"
+    }
+  ],
+  "resolution_minutes": 47,
+  "runbook": "RB-12",
+  "postmortem": "..."
+}

@@ -1,41 +1,28 @@
 [
   {
-    "id": "RB-DB-001",
-    "title": "Postgres connection exhaustion",
-    "service": "postgres",
-    "triggers": ["too many connections", "connection pool", "remaining connection slots"],
-    "steps": [
-      "Check active connections: SELECT usename, state, count(*) FROM pg_stat_activity GROUP BY 1, 2;",
-      "Identify idle-in-transaction sessions older than 5 minutes and terminate them.",
-      "Confirm app pool_size and max_overflow match Postgres max_connections.",
-      "Restart the leaking worker only after the pool config is corrected.",
-      "Watch p99 latency and connection count for 15 minutes before closing."
-    ]
+    "id": "RB-12",
+    "title": "Redis primary failover (self-hosted Redis)",
+    "status": "deprecated",
+    "deprecated_on": "2026-06-10",
+    "replaced_by": "RB-31",
+    "reason": "We migrated to managed Redis, so manual failover steps no longer apply.",
+    "applies_to": ["redis", "checkout-service"],
+    "steps": ["Step 1 ...", "Step 2 ..."]
   },
   {
-    "id": "RB-CACHE-001",
-    "title": "Redis cache stampede",
-    "service": "redis",
-    "triggers": ["cache miss storm", "redis cpu", "origin query rate"],
-    "steps": [
-      "Enable request coalescing / singleflight on the hottest cache keys.",
-      "Stop any cache-flush jobs. Warm the top keys before reopening traffic.",
-      "Stagger TTLs so keys do not expire together.",
-      "If Redis is saturated, fail closed to stale cache rather than the origin DB.",
-      "Confirm origin QPS returned to baseline before ending the incident."
-    ]
+    "id": "RB-31",
+    "title": "Managed Redis failover",
+    "status": "active",
+    "effective_from": "2026-06-10",
+    "replaced_by": null,
+    "applies_to": ["redis", "checkout-service"],
+    "steps": ["Step 1 ...", "Step 2 ..."]
   },
   {
-    "id": "RB-K8S-001",
-    "title": "Pod CrashLoopBackOff / OOMKill",
-    "service": "kubernetes",
-    "triggers": ["CrashLoopBackOff", "OOMKilled", "restart count"],
-    "steps": [
-      "kubectl describe pod and confirm Last State is OOMKilled or Error.",
-      "Compare memory limit to recent working-set from metrics.",
-      "Roll back the last config or image that increased batch size or concurrency.",
-      "Quarantine poison messages if a queue consumer is involved.",
-      "Raise limits only after the leak or batch-size issue is fixed."
-    ]
+    "id": "RB-07",
+    "title": "Postgres connection pool exhaustion",
+    "status": "active",
+    "applies_to": ["payments-api", "pgbouncer", "postgres"],
+    "steps": ["Step 1 ...", "Step 2 ..."]
   }
 ]
