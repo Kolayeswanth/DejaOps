@@ -1,0 +1,14 @@
+[
+  {
+    "id": "ALERT-001",
+    "alert": "CRITICAL: payments-api response latency p99 > 12s for 10 minutes. Error rate spiked to 38%. PgBouncer connections at 100% capacity. Service: payments-api, Region: us-east-1, Severity: SEV-1"
+  },
+  {
+    "id": "ALERT-002",
+    "alert": "WARNING: auth-service returning HTTP 503 for 40% of requests. Upstream dependency redis-cluster-03 unreachable. Last healthy check: 6 minutes ago. Service: auth-service, Region: eu-west-1, Severity: SEV-2"
+  },
+  {
+    "id": "ALERT-003",
+    "alert": "CRITICAL: Kafka consumer lag on topic 'transaction-events' exceeded 500k messages. Consumer group 'ledger-writer' has 0 active members. Disk usage on broker-07 at 94%. Service: ledger-service, Region: us-west-2, Severity: SEV-1"
+  }
+]
