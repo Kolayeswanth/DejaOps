@@ -14,6 +14,7 @@ runbook postmortem engineer feedback fix fixes worked failed on was were been ar
 QUERIES = ["incident root cause and resolution", "runbook deprecated or replaced",
            "fix that worked", "fix that failed", "database connection pool exhaustion",
            "latency and error rate alert", "engineer feedback outcome", "payments service"]
+GRAPH_MEMORY_LIMIT = 160
 
 
 def _get(r, k):
@@ -31,7 +32,7 @@ def _fetch():
             mems.append({"id": f"m{len(mems)}", "text": text, "type": str(typ or "memory")})
 
     try:
-        res = client.list_memories(bank_id=BANK_ID, limit=300)
+        res = client.list_memories(bank_id=BANK_ID, limit=GRAPH_MEMORY_LIMIT)
         rows = _get(res, "items") or _get(res, "results") or []
         for r in rows:
             add(_get(r, "text") or _get(r, "content"), _get(r, "fact_type") or _get(r, "type"))
@@ -144,21 +145,18 @@ def build_graph():
     return {"nodes": nodes, "clusters": clusters, "links": lk}
 
 
-def graph_html(data, hot=None, height=720):
+def graph_html(data, hot=None, height=600):
     payload = json.dumps({**data, "hot": hot or []}).replace("</", "<\\/")
     return HTML.replace("__DATA__", payload).replace("__H__", str(height))
 
 
 def render_brain_page(learned_summary, retain_postmortem=None, evidence=None):
     st.markdown("""<style>
-    .st-key-back_home button,.st-key-rebuild button{border-radius:12px}
+    .st-key-rebuild button{border-radius:12px}
     </style>""", unsafe_allow_html=True)
-    a, b, c = st.columns([1.2, 6, 1.4], vertical_alignment="center")
-    if a.button("Back", key="back_home", use_container_width=True):
-        st.session_state.page = "overview"
-        st.rerun()
-    b.markdown(f"""<div class="hero" style="padding:.2rem 0"><h1 style="font-size:2.4rem">Memory graph</h1>
-    <p style="margin:.1rem 0 .4rem">Explore clusters, inspect individual memories, and follow their nearest relationships.</p>
+    b, c = st.columns([6, 1.4], vertical_alignment="center")
+    b.markdown(f"""<div class="hero" style="padding:.2rem 0 1rem"><h1 style="font-size:2.4rem">How DejaOps remembers</h1>
+    <p style="margin:.35rem 0 .4rem;line-height:1.7">This graph connects stored incidents, runbooks, postmortems, and feedback by shared operational language. Explore a cluster to see related memories, then open a memory to follow its nearest relationships.</p>
     <span class="live"><i class="dot"></i>Memory bank: {BANK_ID}</span></div>""", unsafe_allow_html=True)
     if c.button("Rebuild graph", key="rebuild", use_container_width=True):
         st.session_state.graph = None
@@ -173,43 +171,7 @@ def render_brain_page(learned_summary, retain_postmortem=None, evidence=None):
     hot = mark_hot(st.session_state.graph, evidence)
     if hot:
         st.caption(f"{len(hot)} memories from the latest triage are highlighted in the graph.")
-    components.html(graph_html(st.session_state.graph, hot), height=735, scrolling=False)
-
-    t1, t2 = st.tabs(["Learned summary", "Teach a postmortem"])
-    with t1:
-        if st.button("Refresh summary", key="refresh"):
-            with st.spinner("Refreshing learned summary"):
-                try:
-                    st.session_state.summary, st.session_state.stale = learned_summary(), False
-                except Exception as e:
-                    st.error(str(e))
-        if st.session_state.get("stale"):
-            st.caption("Memory updated - refresh the summary and rebuild the graph")
-        st.markdown(st.session_state.get("summary") or "Click Refresh to load")
-    with t2:
-        confirmation = st.session_state.get("teach_confirmation")
-        if confirmation:
-            st.success("Memory stored successfully.")
-            st.markdown(f"**DejaOps learned:** {confirmation.get('content', '')}")
-            if confirmation.get("id"):
-                st.caption(f"Hindsight memory: {confirmation['id']}")
-        if retain_postmortem:
-            pm = st.text_area("Postmortem", key="pm_text", height=140)
-            if st.button("Teach DejaOps", key="pm_btn"):
-                if not pm.strip():
-                    st.warning("Paste a postmortem first.")
-                else:
-                    try:
-                        result = retain_postmortem(pm.strip())
-                        if not result or not result.get("stored"):
-                            raise RuntimeError("Hindsight did not confirm the memory was stored.")
-                        st.session_state.teach_confirmation = result
-                        st.toast("Memory stored; rebuilding graph")
-                        st.session_state.stale, st.session_state.graph = True, None; st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
-        else:
-            st.info("retain_postmortem is not available in memory.py")
+    components.html(graph_html(st.session_state.graph, hot), height=615, scrolling=False)
 
 
 HTML = r"""<!doctype html><html><head><meta charset="utf-8">
@@ -221,6 +183,7 @@ HTML = r"""<!doctype html><html><head><meta charset="utf-8">
  background:radial-gradient(40rem 26rem at 20% 0%,rgba(124,92,255,.25),transparent 60%),
  radial-gradient(36rem 24rem at 100% 100%,rgba(34,211,238,.16),transparent 60%),#0a0e1a;
  box-shadow:0 20px 60px rgba(0,0,0,.45)}
+#loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:.7rem;color:var(--mut);font-size:.8rem;letter-spacing:.02em;background:rgba(10,14,26,.72);backdrop-filter:blur(8px);z-index:6;transition:opacity .35s ease}.loading-dot{width:9px;height:9px;border-radius:50%;background:var(--cy);box-shadow:0 0 0 0 rgba(34,211,238,.55);animation:loadpulse 1.2s ease-in-out infinite}@keyframes loadpulse{50%{box-shadow:0 0 0 9px rgba(34,211,238,0)}}#loading.ready{opacity:0;pointer-events:none}
 #stage:before{content:"";position:absolute;inset:0;opacity:.12;pointer-events:none;
  background-image:linear-gradient(#fff 1px,transparent 1px),linear-gradient(90deg,#fff 1px,transparent 1px);background-size:44px 44px}
 svg{position:absolute;inset:0;width:100%;height:100%;cursor:grab}svg:active{cursor:grabbing}
@@ -277,6 +240,7 @@ h2{font:700 1.35rem 'Space Grotesk',Inter,sans-serif;margin:.6rem 0 .2rem}
 @keyframes grow{from{width:0}}
 </style></head><body>
 <div id="stage">
+  <div id="loading"><span class="loading-dot"></span><span>Mapping memory relationships…</span></div>
   <svg id="svg"></svg>
   <div id="hud"><span id="crumb"></span><button id="rec"></button></div>
   <div id="hint"><span class="lg"><i style="border-color:#34d399"></i>worked</span><span class="lg"><i style="border-color:#fb7185"></i>failed</span><span class="lg"><i style="border-color:#94a3b8"></i>deprecated</span><span class="lg"><i class="rp"></i>recalled by latest triage</span>· scroll to zoom · drag to pan</div>
@@ -298,7 +262,7 @@ const hot = new Set(D.hot || []);
 for (let i = 0; i < 28; i++) { const s = document.createElement('i'); s.className = 'spark';
   s.style.cssText = `left:${Math.random()*100}%;top:${Math.random()*100}%;animation-delay:${Math.random()*6}s`; stage.appendChild(s); }
 
-if (!D.nodes.length) { $('#empty').style.display = 'grid'; }
+if (!D.nodes.length) { $('#empty').style.display = 'grid'; $('#loading').classList.add('ready'); }
 else {
 const svg = d3.select('#svg').attr('viewBox', [0, 0, W, H]);
 const defs = svg.append('defs');
@@ -331,7 +295,7 @@ const sim = d3.forceSimulation(D.nodes)
   .force('link', d3.forceLink(simLinks).id(d => d.id).strength(l => Math.min(.5, l.w * .3)).distance(80))
   .force('x', d3.forceX(n => cl.get(n.c).cx).strength(.14)).force('y', d3.forceY(n => cl.get(n.c).cy).strength(.14))
   .force('charge', d3.forceManyBody().strength(-70)).force('collide', d3.forceCollide(n => n.r + 20)).stop();
-for (let i = 0; i < 400; i++) sim.tick();
+for (let i = 0; i < 180; i++) sim.tick();
 
 D.clusters.forEach(c => { const ms = D.nodes.filter(n => n.c === c.id);
   c.x = d3.mean(ms, n => n.x); c.y = d3.mean(ms, n => n.y);
@@ -435,7 +399,7 @@ function panelCluster(c) {
    <div class="sec">Memories in this cluster</div>
    ${c.ms.map((n, i) => `<div class="item" data-id="${n.id}" style="--c:${c.col};animation-delay:${i * 50}ms"><span class="sw"></span>
      <div><b>${hot.has(n.id) ? 'Recalled · ' : ''}${esc(n.label)}</b><small>${esc(n.text.slice(0, 95))}…</small></div></div>`).join('')}
-   <button class="back">Zoom out</button>`;
+  `;
   bindList(); }
 function panelNode(n) {
   const t = top(n), mx = Math.max(.001, ...t.map(x => x.w));
@@ -448,7 +412,7 @@ function panelNode(n) {
      <span class="rank">#${i + 1}</span><div style="flex:1"><b>${esc(m.label)}</b><small>${esc(m.text.slice(0, 110))}…</small>
      <div class="mbar"><i style="width:${Math.max(12, x.w / mx * 100)}%"></i></div></div></div>`; }).join('')
      : '<p class="sub">No close neighbours yet.</p>'}
-   <button class="back">Back to cluster</button>`;
+  `;
   bindList(); }
 
 const hotNodes = D.nodes.filter(n => hot.has(n.id)); let hi = 0;
@@ -460,5 +424,6 @@ g.style('opacity', 0).transition().duration(1400).style('opacity', 1);
 svg.call(zoom.transform, d3.zoomIdentity.translate(W * .2, H * .2).scale(.6));
 svg.transition().duration(1400).ease(d3.easeCubicOut).call(zoom.transform, d3.zoomIdentity);
 render();
+requestAnimationFrame(() => $('#loading').classList.add('ready'));
 }
 </script></body></html>"""
