@@ -154,13 +154,13 @@ def render_brain_page(learned_summary, retain_postmortem=None, evidence=None):
     .st-key-back_home button,.st-key-rebuild button{border-radius:12px}
     </style>""", unsafe_allow_html=True)
     a, b, c = st.columns([1.2, 6, 1.4], vertical_alignment="center")
-    if a.button("← Back", key="back_home", use_container_width=True):
-        st.session_state.page = "home"
+    if a.button("Back", key="back_home", use_container_width=True):
+        st.session_state.page = "overview"
         st.rerun()
-    b.markdown(f"""<div class="hero" style="padding:.2rem 0"><h1 style="font-size:2.4rem">Memory Graph</h1>
-    <p style="margin:.1rem 0 .4rem">Click a cluster to zoom in · click a memory to see its nearest neighbours</p>
+    b.markdown(f"""<div class="hero" style="padding:.2rem 0"><h1 style="font-size:2.4rem">Memory graph</h1>
+    <p style="margin:.1rem 0 .4rem">Explore clusters, inspect individual memories, and follow their nearest relationships.</p>
     <span class="live"><i class="dot"></i>Memory bank: {BANK_ID}</span></div>""", unsafe_allow_html=True)
-    if c.button("🔄 Rebuild", key="rebuild", use_container_width=True):
+    if c.button("Rebuild graph", key="rebuild", use_container_width=True):
         st.session_state.graph = None
 
     if st.session_state.get("graph") is None:
@@ -172,13 +172,13 @@ def render_brain_page(learned_summary, retain_postmortem=None, evidence=None):
                 return
     hot = mark_hot(st.session_state.graph, evidence)
     if hot:
-        st.caption(f"★ {len(hot)} memories recalled by your last triage are highlighted in pink.")
+        st.caption(f"{len(hot)} memories from the latest triage are highlighted in the graph.")
     components.html(graph_html(st.session_state.graph, hot), height=735, scrolling=False)
 
-    t1, t2 = st.tabs(["🧠 What DejaOps has learned", "📝 Teach a postmortem"])
+    t1, t2 = st.tabs(["Learned summary", "Teach a postmortem"])
     with t1:
         if st.button("Refresh summary", key="refresh"):
-            with st.spinner("Reflecting on past incidents..."):
+            with st.spinner("Refreshing learned summary"):
                 try:
                     st.session_state.summary, st.session_state.stale = learned_summary(), False
                 except Exception as e:
@@ -187,6 +187,12 @@ def render_brain_page(learned_summary, retain_postmortem=None, evidence=None):
             st.caption("Memory updated - refresh the summary and rebuild the graph")
         st.markdown(st.session_state.get("summary") or "Click Refresh to load")
     with t2:
+        confirmation = st.session_state.get("teach_confirmation")
+        if confirmation:
+            st.success("Memory stored successfully.")
+            st.markdown(f"**DejaOps learned:** {confirmation.get('content', '')}")
+            if confirmation.get("id"):
+                st.caption(f"Hindsight memory: {confirmation['id']}")
         if retain_postmortem:
             pm = st.text_area("Postmortem", key="pm_text", height=140)
             if st.button("Teach DejaOps", key="pm_btn"):
@@ -194,8 +200,11 @@ def render_brain_page(learned_summary, retain_postmortem=None, evidence=None):
                     st.warning("Paste a postmortem first.")
                 else:
                     try:
-                        retain_postmortem(pm.strip())
-                        st.toast("Learned - rebuilding the graph")
+                        result = retain_postmortem(pm.strip())
+                        if not result or not result.get("stored"):
+                            raise RuntimeError("Hindsight did not confirm the memory was stored.")
+                        st.session_state.teach_confirmation = result
+                        st.toast("Memory stored; rebuilding graph")
                         st.session_state.stale, st.session_state.graph = True, None; st.rerun()
                     except Exception as e:
                         st.error(str(e))
@@ -270,9 +279,9 @@ h2{font:700 1.35rem 'Space Grotesk',Inter,sans-serif;margin:.6rem 0 .2rem}
 <div id="stage">
   <svg id="svg"></svg>
   <div id="hud"><span id="crumb"></span><button id="rec"></button></div>
-  <div id="hint"><span class="lg"><i style="border-color:#34d399"></i>worked</span><span class="lg"><i style="border-color:#fb7185"></i>failed</span><span class="lg"><i style="border-color:#94a3b8"></i>deprecated</span><span class="lg"><i class="rp"></i>recalled by last triage</span>· scroll to zoom · drag to pan</div>
+  <div id="hint"><span class="lg"><i style="border-color:#34d399"></i>worked</span><span class="lg"><i style="border-color:#fb7185"></i>failed</span><span class="lg"><i style="border-color:#94a3b8"></i>deprecated</span><span class="lg"><i class="rp"></i>recalled by latest triage</span>· scroll to zoom · drag to pan</div>
   <div id="panel"></div>
-  <div id="empty"><div><div style="font-size:3rem">🧠</div>No memories yet.<br>Teach DejaOps a postmortem, then hit Rebuild.</div></div>
+  <div id="empty"><div><div style="font-size:1.2rem;font-weight:700;margin-bottom:.4rem">No memories yet</div>Teach a postmortem, then rebuild the graph.</div></div>
 </div>
 <script>
 const D = __DATA__;
@@ -283,7 +292,7 @@ const PAL = ['#7c5cff','#22d3ee','#ff5c9d','#34d399','#fbbf24','#fb7185','#60a5f
 const TYPE = {world:'#22d3ee', experience:'#ff5c9d', opinion:'#fbbf24', observation:'#34d399'};
 const tcol = t => TYPE[String(t).toLowerCase()] || '#a78bfa';
 const STATUS = {worked:'#34d399', failed:'#fb7185', mixed:'#fbbf24', deprecated:'#94a3b8'};
-const SLBL = {worked:'✅ Worked', failed:'❌ Failed', mixed:'⚠ Mixed results', deprecated:'🚫 Deprecated'};
+const SLBL = {worked:'Worked', failed:'Failed', mixed:'Mixed results', deprecated:'Deprecated'};
 const hot = new Set(D.hot || []);
 
 for (let i = 0; i < 28; i++) { const s = document.createElement('i'); s.className = 'spark';
@@ -349,7 +358,7 @@ bub.append('text').attr('class', 'bn').attr('text-anchor', 'middle').attr('y', c
 const bb = bub.filter(c => c.ms.some(n => hot.has(n.id))).append('g').attr('transform', c => `translate(${c.r * .72},${-c.r * .72})`);
 bb.append('circle').attr('r', 15).attr('fill', '#ff5c9d').attr('class', 'badgepulse');
 bb.append('text').attr('text-anchor', 'middle').attr('dy', '.35em').attr('fill', '#fff').style('font', '700 11px Inter').style('pointer-events', 'none')
-  .text(c => '★' + c.ms.filter(n => hot.has(n.id)).length);
+  .text(c => c.ms.filter(n => hot.has(n.id)).length + ' recalled');
 
 const node = gN.selectAll('g').data(D.nodes).join('g').attr('transform', n => `translate(${n.x},${n.y})`)
   .style('cursor', 'pointer').style('pointer-events', 'none').on('click', (e, n) => { e.stopPropagation(); focusNode(n); });
@@ -425,26 +434,26 @@ function panelCluster(c) {
      <div class="tbar" style="margin:-.3rem 0 .6rem"><i style="width:${v / c.ms.length * 100}%"></i></div>`).join('')}
    <div class="sec">Memories in this cluster</div>
    ${c.ms.map((n, i) => `<div class="item" data-id="${n.id}" style="--c:${c.col};animation-delay:${i * 50}ms"><span class="sw"></span>
-     <div><b>${hot.has(n.id) ? '★ ' : ''}${esc(n.label)}</b><small>${esc(n.text.slice(0, 95))}…</small></div></div>`).join('')}
-   <button class="back">↩ Zoom out</button>`;
+     <div><b>${hot.has(n.id) ? 'Recalled · ' : ''}${esc(n.label)}</b><small>${esc(n.text.slice(0, 95))}…</small></div></div>`).join('')}
+   <button class="back">Zoom out</button>`;
   bindList(); }
 function panelNode(n) {
   const t = top(n), mx = Math.max(.001, ...t.map(x => x.w));
   $('#panel').innerHTML = `<span class="pill" style="--c:${tcol(n.type)}">${esc(n.type)}</span>
    ${n.status ? `<span class="pill" style="--c:${STATUS[n.status]}">${SLBL[n.status]}</span>` : ''}
-   ${hot.has(n.id) ? `<span class="pill" style="--c:#ff5c9d">★ Recalled</span>` : ''}<h2>${esc(n.label)}</h2>
+   ${hot.has(n.id) ? `<span class="pill" style="--c:#ff5c9d">Recalled</span>` : ''}<h2>${esc(n.label)}</h2>
    <p class="sub">in cluster · ${esc(cl.get(n.c).label)}</p><p class="full">${esc(n.text)}</p>
    <div class="sec">Nearest memories</div>
    ${t.length ? t.map((x, i) => { const m = byId.get(x.id); return `<div class="nn" data-id="${m.id}" style="animation-delay:${i * 90}ms">
      <span class="rank">#${i + 1}</span><div style="flex:1"><b>${esc(m.label)}</b><small>${esc(m.text.slice(0, 110))}…</small>
      <div class="mbar"><i style="width:${Math.max(12, x.w / mx * 100)}%"></i></div></div></div>`; }).join('')
      : '<p class="sub">No close neighbours yet.</p>'}
-   <button class="back">↩ Back to cluster</button>`;
+   <button class="back">Back to cluster</button>`;
   bindList(); }
 
 const hotNodes = D.nodes.filter(n => hot.has(n.id)); let hi = 0;
 if (hotNodes.length) { const rec = $('#rec'); rec.style.display = 'inline-block';
-  rec.textContent = '★ Recalled (' + hotNodes.length + ')';
+  rec.textContent = 'Recalled (' + hotNodes.length + ')' ;
   rec.onclick = e => { e.stopPropagation(); focusNode(hotNodes[hi++ % hotNodes.length]); }; }
 // intro: zoom-in reveal
 g.style('opacity', 0).transition().duration(1400).style('opacity', 1);

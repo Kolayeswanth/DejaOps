@@ -53,7 +53,9 @@ def recall_similar(alert_text):
         for r in res.results:
             if r.text not in seen:
                 seen.add(r.text)
-                out.append({"type": r.type, "text": r.text})
+                out.append({"type": r.type, "text": r.text,
+                            "id": getattr(r, "id", None),
+                            "context": getattr(r, "context", None)})
     return out
 
 def record_outcome(alert_text, fix, worked):
@@ -75,6 +77,7 @@ def learned_summary():
 
 def retain_postmortem(text):
     now = datetime.now()
-    client.retain(bank_id=BANK_ID,
-                  content=f"Postmortem added by an engineer on {now.isoformat(timespec='minutes')}: {text}",
-                  context="postmortem", timestamp=now, retain_async=False)
+    content = f"Postmortem added by an engineer on {now.isoformat(timespec='minutes')}: {text}"
+    result = client.retain(bank_id=BANK_ID, content=content,
+                           context="postmortem", timestamp=now, retain_async=False)
+    return {"stored": True, "id": getattr(result, "id", None), "content": content}
