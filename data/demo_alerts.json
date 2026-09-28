@@ -1,14 +1,14 @@
 [
   {
-    "id": "ALERT-001",
-    "alert": "CRITICAL: payments-api response latency p99 > 12s for 10 minutes. Error rate spiked to 38%. PgBouncer connections at 100% capacity. Service: payments-api, Region: us-east-1, Severity: SEV-1"
+    "id": "DEMO-1",
+    "alert": "payments-api is returning 503s. Pods look Ready, but every database call just hangs waiting for a free slot. pgbouncer shows 287 clients queued and the server side pinned at its limit. Started shortly after 02:00."
   },
   {
-    "id": "ALERT-002",
-    "alert": "WARNING: auth-service returning HTTP 503 for 40% of requests. Upstream dependency redis-cluster-03 unreachable. Last healthy check: 6 minutes ago. Service: auth-service, Region: eu-west-1, Severity: SEV-2"
+    "id": "DEMO-2",
+    "alert": "[FIRING] checkout-service can't save carts: 'READONLY You can't write against a read only replica'. Managed cache cluster northwind-cache-prod says its primary moved to a different node about 6 minutes ago."
   },
   {
-    "id": "ALERT-003",
-    "alert": "CRITICAL: Kafka consumer lag on topic 'transaction-events' exceeded 500k messages. Consumer group 'ledger-writer' has 0 active members. Disk usage on broker-07 at 94%. Service: ledger-service, Region: us-west-2, Severity: SEV-1"
+    "id": "DEMO-3",
+    "alert": "[FIRING] settlement-events consumer group lag above 250,000 messages on topic payment.settled. Partition 3 has stalled and consumers keep rebalancing every 30 seconds."
   }
 ]

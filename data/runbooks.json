@@ -1,5 +1,33 @@
 [
   {
+    "id": "RB-03",
+    "title": "Memory leak after a bad deploy (OOMKilled pods)",
+    "status": "active",
+    "applies_to": ["payments-api", "checkout-service", "kubernetes"],
+    "steps": [
+      "Step 1: Check whether OOMKilled restarts began right after the latest deploy (kubectl rollout history, ArgoCD sync time).",
+      "Step 2: Confirm memory grows steadily per pod (about 10 MB/min or more) rather than spiking with traffic.",
+      "Step 3: Do NOT rely on restarts or raising memory limits. They only delay the crash by 20-30 minutes.",
+      "Step 4: Roll back to the previous release: kubectl rollout undo deployment/<service> or revert the ArgoCD revision.",
+      "Step 5: Verify memory working set stays flat for 15 minutes and 5xx rate returns to baseline.",
+      "Step 6: Open a ticket with the release owner and attach a heap dump if one was captured."
+    ]
+  },
+  {
+    "id": "RB-07",
+    "title": "Postgres connection pool exhaustion",
+    "status": "active",
+    "applies_to": ["payments-api", "checkout-service", "pgbouncer", "postgres"],
+    "steps": [
+      "Step 1: Check pgbouncer stats (SHOW POOLS): cl_waiting above 50 with sv_active at pool_size means exhaustion.",
+      "Step 2: Check whether nightly-settlement-batch (or any batch job) is running and holding many connections.",
+      "Step 3: Do NOT scale up application pods or raise max_connections. This adds more clients to the same saturated pool and has failed in every past incident.",
+      "Step 4: Pause the batch: kubectl patch cronjob nightly-settlement-batch -p '{\"spec\":{\"suspend\":true}}' and delete the running job.",
+      "Step 5: Restart pgbouncer: kubectl rollout restart deployment/pgbouncer.",
+      "Step 6: Confirm cl_waiting drops to 0 and API latency recovers, then resume the batch only in the off-peak window."
+    ]
+  },
+  {
     "id": "RB-12",
     "title": "Redis primary failover (self-hosted Redis)",
     "status": "deprecated",
@@ -7,7 +35,67 @@
     "replaced_by": "RB-31",
     "reason": "We migrated to managed Redis, so manual failover steps no longer apply.",
     "applies_to": ["redis", "checkout-service"],
-    "steps": ["Step 1 ...", "Step 2 ..."]
+    "steps": [
+      "Step 1: Check sentinel state: redis-cli -h redis-sentinel -p 26379 SENTINEL master mymaster.",
+      "Step 2: If no automatic promotion occurred, force it: SENTINEL failover mymaster.",
+      "Step 3: Confirm the new master with SENTINEL get-master-addr-by-name mymaster.",
+      "Step 4: Rolling restart checkout-service so clients drop the cached old master address.",
+      "Step 5: Investigate why the old master failed (memory, node, network) before bringing it back as a replica."
+    ]
+  },
+  {
+    "id": "RB-19",
+    "title": "Expired or failing TLS certificate renewal",
+    "status": "active",
+    "applies_to": ["ingress-nginx", "cert-manager", "checkout-service", "payments-api"],
+    "steps": [
+      "Step 1: Identify the expired certificate: kubectl get certificate -A and check notAfter, or inspect it with openssl s_client.",
+      "Step 2: Check cert-manager: kubectl describe certificate and challenges, and confirm the issuer's renewal job is not suspended.",
+      "Step 3: Do NOT just restart pods or ingress. They reload the same expired certificate.",
+      "Step 4: Fix the cause (ACME challenge path blocked, suspended renewal, manually managed secret) then force renewal: cmctl renew <certificate>.",
+      "Step 5: Roll affected pods so they load the new certificate and verify with openssl s_client.",
+      "Step 6: Make sure expiry alerts at 14 days exist for this certificate."
+    ]
+  },
+  {
+    "id": "RB-22",
+    "title": "Disk full on Postgres volume or Kubernetes node",
+    "status": "active",
+    "applies_to": ["postgres", "kubernetes", "fluent-bit"],
+    "steps": [
+      "Step 1: Find what is consuming space: df -h, du on the volume, and pg_wal size for Postgres.",
+      "Step 2: For Postgres, check pg_replication_slots for inactive slots retaining WAL and drop abandoned ones.",
+      "Step 3: For nodes, check container logs (debug logging left on) and unused images: crictl rmi --prune.",
+      "Step 4: Do NOT delete evicted pods or restart log shippers. These do not free space.",
+      "Step 5: If space is still short, expand the PVC or add node storage.",
+      "Step 6: Add or tune alerts (replication slot lag, node filesystem at 80%)."
+    ]
+  },
+  {
+    "id": "RB-25",
+    "title": "DNS resolution failures (CoreDNS)",
+    "status": "active",
+    "applies_to": ["kubernetes", "coredns", "checkout-service", "payments-api"],
+    "steps": [
+      "Step 1: Check CoreDNS pods: kubectl -n kube-system get pods -l k8s-app=kube-dns for CrashLoopBackOff or missing replicas.",
+      "Step 2: If pods crash, read their logs for Corefile errors and revert the ConfigMap to the previous revision.",
+      "Step 3: If pods are healthy but throttled or too few, scale coredns to at least 4 replicas.",
+      "Step 4: Do NOT restart application pods. They are not the cause.",
+      "Step 5: Verify with nslookup from a debug pod and watch the error rate return to zero."
+    ]
+  },
+  {
+    "id": "RB-28",
+    "title": "Upstream API rate limiting (429 responses)",
+    "status": "active",
+    "applies_to": ["payments-api", "acquirer-gateway", "fraud-scoring"],
+    "steps": [
+      "Step 1: Compare outbound requests per minute with the vendor's documented quota.",
+      "Step 2: Reduce call volume: enable request batching or caching, and lower retries with exponential backoff and jitter.",
+      "Step 3: Do NOT raise retry counts or replay dead-letter queues while throttled. This amplifies the problem.",
+      "Step 4: Contact the vendor for a temporary quota increase if traffic is legitimate.",
+      "Step 5: Drain the manual review or dead-letter queue slowly once error rates are normal."
+    ]
   },
   {
     "id": "RB-31",
@@ -15,14 +103,15 @@
     "status": "active",
     "effective_from": "2026-06-10",
     "replaced_by": null,
+    "supersedes": "RB-12",
     "applies_to": ["redis", "checkout-service"],
-    "steps": ["Step 1 ...", "Step 2 ..."]
-  },
-  {
-    "id": "RB-07",
-    "title": "Postgres connection pool exhaustion",
-    "status": "active",
-    "applies_to": ["payments-api", "pgbouncer", "postgres"],
-    "steps": ["Step 1 ...", "Step 2 ..."]
+    "steps": [
+      "Step 1: Do NOT use sentinel commands. The managed service has no sentinels to command (that was RB-12).",
+      "Step 2: Open the managed Redis console and confirm which node is the current primary and the failover event time.",
+      "Step 3: If no automatic failover occurred, trigger one from the managed Redis control-plane (console or CLI).",
+      "Step 4: Roll checkout-service pods so clients re-resolve the managed endpoint DNS and drop the old primary address.",
+      "Step 5: Verify cart writes succeed and READONLY errors stop.",
+      "Step 6: Record the provider maintenance or failover reason in the incident."
+    ]
   }
 ]
