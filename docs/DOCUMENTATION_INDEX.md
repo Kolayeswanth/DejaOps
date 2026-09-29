@@ -28,7 +28,7 @@ Start with [LLM_CONTEXT.md](LLM_CONTEXT.md) for an implementation-oriented map, 
 
 - [CURRENT_CAPABILITIES.md](CURRENT_CAPABILITIES.md)
 - [ROADMAP.md](ROADMAP.md)
-- [JUDGE_READINESS.md](JUDGE_READINESS.md)
+- [DEMO_GUIDE.md](DEMO_GUIDE.md)
 - [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md)
 - [WORKFLOWS.md](WORKFLOWS.md)
 - [docs/README.md](README.md)

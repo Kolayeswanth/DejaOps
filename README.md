@@ -179,6 +179,3 @@ The current implementation focuses on on-call incident response. The same memory
 
 Start with [EXTENDING_THE_PROJECT.md](docs/EXTENDING_THE_PROJECT.md) and [LLM_CONTEXT.md](docs/LLM_CONTEXT.md). Keep data schemas and normalized agent response keys compatible, validate dataset changes, add focused tests for new memory or provenance behavior, and document new integrations with their configuration and security boundaries.
 
-## HackWithHyderabad
-
-DejaOps was developed for the HackWithHyderabad Hackathon, with the submission focused on persistent memory, agentic incident response, and feedback-driven improvement. The project identity is the reusable open-source incident response foundation described above.
