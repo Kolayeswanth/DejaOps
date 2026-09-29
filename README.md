@@ -1,98 +1,184 @@
 # DejaOps
 
-**The on-call agent that has seen this before.**
+**An open-source AI Incident Response Assistant that turns operational experience into reusable memory.**
 
-DejaOps is an incident-response assistant with long-term memory, built on [Hindsight](https://github.com/vectorize-io/hindsight). Paste an alert and it shows two answers side by side: what a generic LLM would say, and what DejaOps says after recalling your team's past incidents, failed fixes and outdated runbooks. Mark a fix as **Worked** or **Failed** and the next recommendation changes.
+DejaOps helps on-call engineers investigate alerts with persistent Hindsight memory, incident history, runbooks, action outcomes, and an explicit feedback loop.
 
-- Demo video: `[ADD YOUR YOUTUBE LINK]`
+## Why this exists
 
+Incident response is often repetitive. Useful context is distributed across incidents, runbooks, and postmortems, while failed remediations can be easy to repeat. DejaOps compares a generic response with a response grounded in recalled operational history.
 
-## The problem
+## The idea
 
-On-call engineers keep re-solving incidents their team has already solved. The knowledge lives in old tickets, postmortems and Slack threads, and runbooks quietly go out of date. A stateless chatbot cannot know that "scale up the pods" already failed three times on this exact failure, or that runbook RB-12 was replaced last month.
+Traditional assistant: `Alert -> AI -> Answer`
 
-## What memory changes
+DejaOps: `Alert -> Investigate -> Recall -> Recommend -> Observe outcome -> Remember -> Recall on future incidents`
 
-| Situation | Without memory | With Hindsight memory |
-|---|---|---|
-| Database connection pool exhausted | Generic checklist (raise `max_connections`, restart the service) | Cites past incidents, puts the fix that worked first, warns that scaling pods failed before |
-| A runbook was replaced | Recommends whatever it was trained on | Warns the old runbook is deprecated and names its replacement |
-| An alert it has never seen | Confident generic advice | "No similar past incidents found; low confidence" and no invented history |
-| Engineer marks a fix Worked / Failed | Forgets | The outcome is stored and shapes the next answer |
-| Engineer pastes a new postmortem | Cannot learn | Learns it immediately and cites it next time |
-
-## How Hindsight memory is used
-
-One Hindsight memory bank per company (`DEJAOPS_BANK`, see `.env.example`).
-
-| Operation | Where | What happens |
-|---|---|---|
-| `retain` | `memory.retain_incident`, `retain_runbook` | Every incident (alert, logs, root cause, each action and whether it worked or failed, postmortem) and every runbook (including its deprecation date and replacement) is stored with its real timestamp and a document id |
-| `retain` | `memory.record_outcome` | Each Worked / Failed click is stored as timestamped engineer feedback |
-| `retain` | `memory.retain_postmortem` | A pasted postmortem becomes memory instantly |
-| `recall` | `memory.recall_similar` | Two recalls per alert: one with the alert text, one asking which runbooks apply and whether any are deprecated. Hindsight runs semantic, keyword, graph and temporal search and returns what fits the token budget |
-| `reflect` | `memory.learned_summary` | Produces the "what DejaOps has learned" summary, instructed to use only stored facts |
-| bank config | `memory.init_bank` | A mission and disposition tell the bank to track fixes that worked or failed and to never recommend a fix that failed before |
-
-The Memory Graph page (the 🧠 button) reads stored memories with `list_memories`, groups them by similarity on our side (token overlap and shared incident or runbook ids), and lets you zoom from cluster to memory to nearest neighbours. Memories recalled by your last triage are highlighted. This clustering is our own visualisation, not Hindsight's internal graph.
+```mermaid
+flowchart TD
+    A[New alert] --> B[AI investigation]
+    B --> C[Runbooks + context + past experiences]
+    C --> D[Action or recommendation]
+    D --> E[Outcome observed]
+    E --> F[Feedback loop]
+    F --> G[Hindsight memory]
+    G --> A
+```
 
 ## Architecture
 
-```
- Streamlit UI (app.py, brain_graph.py)
-        |
-        v
-  agent.py  ---- Groq LLM (gpt-oss-120b, qwen3-32b fallback)
-        |            ^
-        v            | only recalled memory + rules
-  memory.py  ----> Hindsight  (retain / recall / reflect)
+```mermaid
+flowchart TD
+    User[On-call engineer] --> UI[Streamlit UI]
+    UI --> Agent[agent.py]
+    Agent --> LLM[Groq LLM]
+    Agent --> Context[Incident and runbook context]
+    Agent --> Memory[memory.py]
+    Memory --> Hindsight[Hindsight memory bank]
+    Agent --> Provenance[Outcome and provenance enrichment]
+    Provenance --> Response[Structured response]
+    Response --> UI
+    UI --> Feedback[Worked or Failed outcome]
+    Feedback --> Memory
+    UI --> Graph[brain_graph.py]
+    Graph --> Hindsight
 ```
 
-`agent.py` gives the LLM only what Hindsight recalled, plus rules: never recommend a fix that failed before, warn about deprecated runbooks (only if relevant), cite incident ids, and admit when nothing similar exists. Model output is validated and normalised so the UI cannot break on malformed JSON. Inputs that are not alerts ("hi") are rejected before any model call.
-
-## Setup
-
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant S as Streamlit
+    participant A as Agent
+    participant M as Hindsight memory
+    participant L as Groq LLM
+    U->>S: Submit alert
+    S->>A: triage(alert, memory=True)
+    A->>M: Recall alert and runbook context
+    M-->>A: Relevant memories
+    A->>L: Context plus alert
+    L-->>A: Structured investigation
+    A-->>S: Hypothesis, fixes, evidence, warnings
+    S-->>U: Review recommendation
+    U->>S: Mark Worked or Failed
+    S->>M: Retain outcome feedback
 ```
-git clone <this repo>
+
+## Key features
+
+- AI-assisted incident investigation through Groq.
+- Persistent incident, runbook, postmortem, and feedback memory with Hindsight.
+- Generic and memory-assisted responses shown side by side.
+- Worked/Failed outcome recording for memory-assisted fixes.
+- Historical evidence, warnings, rejected remediations, and action provenance.
+- Deprecated runbook context and replacement relationships.
+- Interactive Memory Graph with clusters, statuses, nearest relationships, and latest-recall highlighting.
+- Synthetic Northwind Payments operational dataset and demo alerts.
+- Streamlit interface with a small, inspectable Python codebase.
+
+## Current project metrics
+
+These are repository and dataset counts, not production performance claims.
+
+| Metric | Current value |
+|---|---:|
+| Incidents | 120 |
+| Runbooks | 20 |
+| Demo alerts | 10 |
+| Action records | 304 |
+| Worked actions | 172 |
+| Failed actions | 132 |
+| Deprecated runbooks | 2 |
+| Worked-action rate | 56.58% |
+| Failed-action rate | 43.42% |
+| Python source files | 8 |
+| Python source lines | 1,283 |
+| Test files | 2 |
+| Test functions | 15 |
+
+## How it works
+
+1. Choose a demo alert or paste an alert containing a service, symptom, and error detail.
+2. DejaOps validates the input and runs a generic baseline alongside memory-assisted triage.
+3. Hindsight recalls related history and asks which runbooks apply or are deprecated.
+4. The agent receives recalled memory, generates structured JSON, and the application normalizes it.
+5. The UI presents hypotheses, vetted fixes, evidence, warnings, confidence, and memory influence.
+6. Mark a memory-assisted fix **Worked** or **Failed** to retain engineer feedback.
+7. Open the Memory Graph to explore stored memories and evidence connected to the latest triage.
+
+## Example workflow
+
+1. A payments alert arrives with elevated errors and database symptoms.
+2. DejaOps recalls related incidents and applicable runbook context.
+3. The agent presents a hypothesis, historical evidence, and recommended fixes.
+4. An engineer reviews the recommendation and records whether the fix worked.
+5. The outcome is retained as operational memory and can be recalled during a later related alert.
+
+The system improves future context through retained experience; it does not update model weights.
+
+## Dataset
+
+The fictional Northwind Payments environment contains recurring patterns across Kubernetes, Postgres/PgBouncer, Redis, ingress-nginx, CoreDNS, Kafka, payments-api, checkout-service, auth-service, ledger-service, orders-api, notification-service, and the PayFlow gateway where present in the source data. All records are synthetic and live under `data/`.
+
+## Quick start
+
+```powershell
+git clone <repository-url>
 cd DejaOps
 python -m venv .venv
-.venv\Scripts\activate        # macOS/Linux: source .venv/bin/activate
+.venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env        # macOS/Linux: cp .env.example .env  then fill in the keys
-python seed.py                # loads the synthetic company history into the bank
-python check_setup.py         # verifies Hindsight, Groq and the bank
+copy .env.example .env
+python validate_data.py
+python seed.py
+python check_setup.py
 streamlit run app.py
 ```
 
-`.env` needs `HINDSIGHT_URL`, `HINDSIGHT_API_KEY`, `GROQ_API_KEY` and `DEJAOPS_BANK`. Seeding is resumable: it records progress in `data/.seeded_<bank>.txt`.
+For macOS/Linux, use `source .venv/bin/activate` and `cp .env.example .env`.
 
-## Data
+Set `HINDSIGHT_URL`, `HINDSIGHT_API_KEY`, and `GROQ_API_KEY` in `.env`. `DEJAOPS_BANK` optionally selects the Hindsight bank. Never commit secrets. Seeding is resumable through a bank-specific progress file under `data/`.
 
-The company, **Northwind Payments**, is fictional and all data is synthetic (generated with an LLM, then checked by `validate_data.py`): 120 incidents, 20 runbooks and 10 demo alerts. The history is designed with recurring patterns (pool exhaustion, Redis failover, TLS expiry, memory leaks, disk full from WAL, DNS, a flaky payment gateway), fixes that repeatedly fail, and runbooks that are deprecated on known dates. Demo alerts are deliberately not copies of stored incidents, and two describe problems the history has never seen.
+## Repository structure
 
-## Project layout
-
+```text
+app.py              Streamlit triage UI and feedback controls
+agent.py            Alert guard, prompts, Groq call, normalization, provenance
+memory.py           Hindsight bank, retain, recall, and reflect wrapper
+brain_graph.py      Memory listing, lexical clustering, and D3 visualization
+seed.py             Resumable JSON-to-Hindsight loader
+validate_data.py    Dataset schema and relationship checks
+check_setup.py      Hindsight and Groq connectivity checks
+merge_batches.py    Incident batch merge utility
+data/               Synthetic incidents, runbooks, alerts, and batches
+tests/              Focused pytest coverage for memory and agent behavior
+docs/               Architecture, workflow, extension, and presentation docs
 ```
-app.py            Streamlit UI: triage, side-by-side comparison, Worked/Failed feedback
-brain_graph.py    Memory Graph page (D3 cluster explorer)
-agent.py          LLM triage with rules, validation and input guard
-memory.py         Hindsight retain / recall / reflect wrapper
-seed.py           Resumable loader for the company history
-validate_data.py  Sanity checks on the data files
-check_setup.py    Pre-demo health check
-data/             incidents.json, runbooks.json, demo_alerts.json
-```
 
-## Lessons learned
+## Documentation
 
-- The Hindsight Python client uses async networking internally. Calling it from a worker thread fails with "Timeout context manager should be used inside a task", so all Hindsight calls stay on the main thread and only the Groq-only baseline runs in a thread.
-- Feedback memories have no incident id, so the agent labels them `FEEDBACK` instead of guessing.
-- Environment variables set in the shell override `.env` unless you load it with `override=True`. We hit this and briefly read the wrong bank.
+Start with [the documentation index](docs/DOCUMENTATION_INDEX.md), [the project overview](docs/PROJECT_OVERVIEW.md), and [the LLM context guide](docs/LLM_CONTEXT.md).
 
-## Limitations
+Important references include [system architecture](docs/SYSTEM_ARCHITECTURE.md), [memory architecture](docs/MEMORY_ARCHITECTURE.md), [the feedback loop](docs/FEEDBACK_LOOP.md), [data model](docs/DATA_MODEL.md), [testing](docs/TESTING.md), and [extending the project](docs/EXTENDING_THE_PROJECT.md).
 
-- All data is synthetic, so accuracy on real incidents is unproven.
-- There are no PagerDuty, Slack or Datadog integrations yet, and no access control or redaction of sensitive logs.
-- DejaOps suggests, it does not act. A human approves every change.
-- Whether one Worked / Failed click changes a recommendation depends on how much history already exists for that pattern.
-- Graph clustering uses lexical similarity and can group unrelated memories that share vocabulary.
+## Built to be adapted
+
+Clone the repository, configure model and memory credentials, run the Streamlit app, replace the demo data, add domain-specific tools, define outcome signals, and let the feedback loop create reusable operational memory. The current implementation provides these boundaries; each new integration should add its own authorization, audit, and data-handling policy.
+
+The current implementation focuses on on-call incident response. The same memory and feedback architecture can later support SRE, SOC, IT operations, support operations, and infrastructure troubleshooting workflows.
+
+## Technology
+
+- Python
+- Streamlit
+- Groq
+- Hindsight via `hindsight-client`
+- JSON datasets
+- pytest
+
+## Contributing and extending
+
+Start with [EXTENDING_THE_PROJECT.md](docs/EXTENDING_THE_PROJECT.md) and [LLM_CONTEXT.md](docs/LLM_CONTEXT.md). Keep data schemas and normalized agent response keys compatible, validate dataset changes, add focused tests for new memory or provenance behavior, and document new integrations with their configuration and security boundaries.
+
+## HackWithHyderabad
+
+DejaOps was developed for the HackWithHyderabad Hackathon, with the submission focused on persistent memory, agentic incident response, and feedback-driven improvement. The project identity is the reusable open-source incident response foundation described above.
