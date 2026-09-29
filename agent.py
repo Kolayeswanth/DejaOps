@@ -22,6 +22,9 @@ SYSTEM_MEMORY = ("You are DejaOps, an on-call assistant with memory of this comp
                  "- Base your answer on MEMORY and cite incident IDs (like INC-014) in evidence.\n"
                  "- If MEMORY shows a fix FAILED before, do NOT recommend it; add a warning saying "
                  "it failed and in which incidents.\n"
+                 "- If a remediation succeeded in older incidents but a DEPRECATED or later-failed "
+                 "attempt of the SAME remediation exists too, treat the deprecation/later failure as "
+                 "authoritative: do not recommend it, and explain the shift in memory_influence.\n"
                  "- If MEMORY contains a previously attempted remediation that failed under similar conditions, "
                  "add a rejected_by_memory object with the failed remediation, incident ID, outcome, why it failed, "
                  "and confidence.\n"
@@ -69,37 +72,62 @@ def _step_similarity(a, b):
     return len(a_tokens & b_tokens) / len(union)
 
 
+FAIL_CUES = ("failed to resolve", "did not resolve", "did not work", "was unsuccessful",
+             "had no effect", "did not fix", "was ineffective", "failed.", " failed ", "failed to")
+WORK_CUES = ("resolved the", "successfully resolved", "fixed the", "resolved it",
+             "worked.", " worked ", "successfully")
+INC_RE = re.compile(r"\bINC-\d+\b")
+
+
+def _split_sentences(text):
+    text = (text or "").replace("\n", " ")
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+|\s*\|\s*", text) if s.strip()]
+
+
+def _sentence_outcome(sentence):
+    low = " " + sentence.lower() + " "
+    if any(cue in low for cue in FAIL_CUES):
+        return "failed"
+    if any(cue in low for cue in WORK_CUES):
+        return "worked"
+    return None
+
+
 def _parse_memory_actions(memory_text):
+    """Best-effort extraction of (step, outcome, incident_id) triples.
+
+    Hindsight rewrites retained text into its own sentences on recall, so this
+    cannot assume the literal "- Tried: X -> WORKED" format used at retain
+    time. It parses natural prose sentence by sentence and only falls back to
+    the literal format for the rare case it is still present verbatim.
+    """
+    memory_text = memory_text or ""
     actions = []
-    incident_id = None
-    match = re.search(r"Incident\s+([A-Z0-9]+(?:-[A-Z0-9]+)*-\d+)", memory_text or "")
-    if match:
-        incident_id = match.group(1)
-    date_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", memory_text or "")
-    date = date_match.group(1) if date_match else None
-    for step, outcome in re.findall(r"-\s*Tried:\s*(.+?)\s*->\s*(WORKED|FAILED)", (memory_text or ""), flags=re.I | re.S):
-        reason = ""
-        match_reason = re.search(r"Postmortem:\s*(.+?)(?:\n|$)", memory_text or "", flags=re.I | re.S)
-        if match_reason:
-            reason = match_reason.group(1).strip()
-        actions.append({"step": step.strip(), "outcome": outcome.lower(), "reason": reason,
-                        "incident_id": incident_id, "date": date})
-    for outcome, step in re.findall(r"\bWhat\s+(worked|failed)\s*:\s*(.+?)(?:\.\s|\.$|\n|$)",
-                                    (memory_text or ""), flags=re.I | re.S):
-        reason = ""
-        match_reason = re.search(r"(?:Postmortem|Historical result)\s*:\s*(.+?)(?:\n|$)", memory_text or "", flags=re.I | re.S)
-        if match_reason:
-            reason = match_reason.group(1).strip()
-        actions.append({"step": step.strip(), "outcome": outcome.lower(), "reason": reason,
-                        "incident_id": incident_id, "date": date})
-    for step, outcome in re.findall(r"([A-Za-z][^.\n]*?)\s+(failed|worked)\.",
-                                    (memory_text or ""), flags=re.I | re.M):
+    mem_id_match = INC_RE.search(memory_text)
+    mem_incident_id = mem_id_match.group(0) if mem_id_match else None
+    date_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", memory_text)
+    mem_date = date_match.group(1) if date_match else None
+
+    # Legacy exact pattern: still checked in case raw retain-time text is
+    # ever returned verbatim (e.g. very short memories).
+    for step, outcome in re.findall(r"-\s*Tried:\s*(.+?)\s*->\s*(WORKED|FAILED)", memory_text, flags=re.I | re.S):
         actions.append({"step": step.strip(), "outcome": outcome.lower(), "reason": "",
-                        "incident_id": incident_id, "date": date})
-    for step, outcome in re.findall(r"fix\s*['\"](.+?)['\"]\s*(WORKED|FAILED)\.", (memory_text or ""), flags=re.I | re.S):
+                        "incident_id": mem_incident_id, "date": mem_date})
+    for step, outcome in re.findall(r"fix\s*[\'\"](.+?)[\'\"]\s*(WORKED|FAILED)\.", memory_text, flags=re.I | re.S):
         actions.append({"step": step.strip(), "outcome": outcome.lower(),
                         "reason": "Engineer feedback recorded from a prior attempt.",
-                        "incident_id": incident_id, "date": date})
+                        "incident_id": mem_incident_id, "date": mem_date})
+
+    # Natural-language parsing: this is the path that actually matches what
+    # Hindsight returns on recall.
+    for sentence in _split_sentences(memory_text):
+        outcome = _sentence_outcome(sentence)
+        if not outcome:
+            continue
+        sent_id_match = INC_RE.search(sentence)
+        actions.append({"step": sentence, "outcome": outcome, "reason": "",
+                        "incident_id": (sent_id_match.group(0) if sent_id_match else mem_incident_id),
+                        "date": mem_date})
     return actions
 
 
@@ -116,7 +144,7 @@ def build_action_provenance(memories, candidate_fixes=None):
             for action in actions:
                 if not action.get("incident_id"):
                     continue
-                if _step_similarity(candidate, action["step"]) < 0.30:
+                if _step_similarity(candidate, action["step"]) < 0.16:
                     continue
                 if action["outcome"] == "worked" and primary_candidate and candidate != primary_candidate:
                     continue
@@ -161,9 +189,9 @@ def detect_rejected_by_memory(alert_text, mems, candidate_fixes=None):
                 continue
             for failed in failed_steps:
                 similarity = _step_similarity(step, failed["step"])
-                if similarity < 0.20:
+                if similarity < 0.14:
                     continue
-                mixed = any(_step_similarity(step, w["step"]) >= 0.20 for w in worked_steps)
+                mixed = any(_step_similarity(step, w["step"]) >= 0.14 for w in worked_steps)
                 reason = failed.get("reason") or "Historical evidence shows this remediation failed under similar conditions."
                 item = {
                     "remediation": failed["step"],
@@ -176,6 +204,40 @@ def detect_rejected_by_memory(alert_text, mems, candidate_fixes=None):
                 if item not in matches:
                     matches.append(item)
     return matches
+
+
+def list_failed_actions(mems, limit=5):
+    """Every distinct failed action found in the recalled memories, regardless of
+    whether it overlaps with what's currently recommended.
+
+    detect_rejected_by_memory() above only fires when a FAILED historical action
+    resembles one of the model's *current* recommendations — but SYSTEM_MEMORY
+    already instructs the model never to recommend something that failed before,
+    so that set is nearly always empty by construction and the check rarely has
+    anything to compare against. This is the fallback that actually powers the
+    "rejected by memory" panel: it surfaces what was tried and failed for this
+    alert's situation, independent of the current recommendation list.
+    """
+    seen, items = set(), []
+    for memory in mems or []:
+        for action in _parse_memory_actions((memory or {}).get("text") or ""):
+            if action["outcome"] != "failed":
+                continue
+            key = (action["step"], action.get("incident_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({
+                "remediation": action["step"],
+                "incident_id": action.get("incident_id") or "FEEDBACK",
+                "outcome": "failed",
+                "reason": "Historical evidence shows this was tried and did not resolve a similar incident.",
+                "date": action.get("date"),
+                "confidence": "medium",
+            })
+            if len(items) >= limit:
+                return items
+    return items
 
 
 def _ask(system, user):
@@ -254,6 +316,48 @@ NOT_ALERT = ("If the input is not an incident alert (a greeting, a question, ran
              "hypothesis \"This doesn't look like an alert.\", empty recommended_fixes and evidence, "
              "and the single warning \"Not an incident alert.\"")   
 
+def _containment(candidate, target):
+    """Fraction of candidate's own tokens that also appear in target.
+
+    Jaccard similarity (_step_similarity) penalizes matching a short
+    recommendation like "Runbook RB-15 manual TLS renewal" against a full
+    prose sentence from memory like "Runbook RB-15 manual TLS renewal was
+    deprecated and did not resolve incident INC-088...", because the long
+    sentence's extra words dilute the intersection-over-union ratio well
+    below any reasonable threshold even though every word of the short
+    candidate is present. Containment (intersection over the candidate's own
+    token count) is the right measure for "does this short fix restate a
+    remediation described in this longer memory sentence".
+    """
+    a_tokens, b_tokens = _token_set(candidate), _token_set(target)
+    if not a_tokens or not b_tokens:
+        return 0.0
+    return len(a_tokens & b_tokens) / len(a_tokens)
+
+
+def demote_conflicting_fixes(fixes, rejected):
+    """Never let a fix that memory just rejected still show up as a recommendation.
+
+    The model is instructed not to recommend a previously-failed action, but it
+    can still slip through (e.g. an older successful run of the same runbook
+    outweighs a newer failure in its reasoning). This is a deterministic
+    safety net: any recommended fix that closely matches a rejected
+    remediation is pulled out of the recommendation list before the UI ever
+    renders it, so the two panels can never contradict each other.
+    """
+    if not fixes or not rejected:
+        return fixes, []
+    rejected_steps = [r.get("remediation", "") for r in rejected if isinstance(r, dict)]
+    kept, demoted = [], []
+    for fix in fixes:
+        step = fix.get("step", "") if isinstance(fix, dict) else str(fix)
+        if any(_containment(step, rs) >= 0.6 for rs in rejected_steps):
+            demoted.append(fix)
+        else:
+            kept.append(fix)
+    return kept, demoted
+
+
 def triage(alert_text, use_memory=True):
     if not looks_like_alert(alert_text):
         return {"hypothesis": "This doesn't look like an alert. Paste the alert text or pick a demo alert.",
@@ -268,19 +372,31 @@ def triage(alert_text, use_memory=True):
         out = _ask(SYSTEM_NO_MEMORY, f"ALERT:\n{alert_text}")
     norm = _normalize(out)
     if use_memory:
-        norm["rejected_by_memory"] = detect_rejected_by_memory(alert_text, mems, norm.get("recommended_fixes", []))
+        # The LLM saw the full recalled MEMORY block and already produced its own
+        # `evidence` and `rejected_by_memory`, validated by _normalize(). Those are
+        # the primary source of truth for the UI. The local regex/token-overlap
+        # parsing below (build_action_provenance) is best-effort enrichment on top
+        # of Hindsight's own paraphrased recall text, and is used to backfill
+        # rejected_by_memory only when the model didn't already supply it — never
+        # to filter down evidence the model already cited correctly.
         norm["recalled_memories"] = mems
-        norm["display_memories"] = select_display_memories(alert_text, mems, norm.get("recommended_fixes", []))
-        display_text = {memory.get("text") for memory in norm["display_memories"]}
-        norm["action_provenance"] = [
-            item for item in build_action_provenance(mems, norm.get("recommended_fixes", []))
-            if item["memory_text"] in display_text
-        ]
-        selected_ids = {str(m.get("text", "")) for m in norm["display_memories"]}
-        norm["display_evidence"] = [
-            evidence for evidence in norm.get("evidence", [])
-            if any(str(evidence.get("incident_id", "")) in text for text in selected_ids)
-        ]
+        norm["action_provenance"] = build_action_provenance(mems, norm.get("recommended_fixes", []))
+        if not norm.get("rejected_by_memory"):
+            norm["rejected_by_memory"] = detect_rejected_by_memory(alert_text, mems, norm.get("recommended_fixes", []))
+        if not norm.get("rejected_by_memory"):
+            norm["rejected_by_memory"] = list_failed_actions(mems)
+        norm["recommended_fixes"], demoted = demote_conflicting_fixes(
+            norm.get("recommended_fixes", []), norm["rejected_by_memory"])
+        for fix in demoted:
+            step = fix.get("step", "") if isinstance(fix, dict) else str(fix)
+            norm["warnings"].append(
+                f"Removed from recommendations: \"{step}\" matches a remediation memory has already rejected.")
+        # display_memories/display_evidence used to be filtered down to only what
+        # the local parser could match, which silently hid correct LLM evidence
+        # whenever Hindsight's recall wording didn't fit the parser's patterns.
+        # They now default to everything the model actually used.
+        norm["display_memories"] = mems
+        norm["display_evidence"] = norm.get("evidence", [])
     else:
         norm["recalled_memories"] = []
         norm["display_memories"] = []
